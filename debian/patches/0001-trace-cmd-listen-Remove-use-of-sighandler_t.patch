@@ -1,0 +1,31 @@
+From e6a8bc7d8a6212561be56993117038c034704b3e Mon Sep 17 00:00:00 2001
+From: Seth Forshee <seth.forshee@canonical.com>
+Date: Wed, 23 Oct 2013 10:41:51 -0500
+Subject: [PATCH] trace-cmd/listen: Remove use of sighandler_t
+
+sighandler_t is a GNU extension and may not be defined if
+_GNU_SOURCE is not set. To minimize the potential for build
+problems, change signal_setup() to declare its handle argument
+the same way struct sigaction declares the sa_handler member.
+
+Signed-off-by: Seth Forshee <seth.forshee@canonical.com>
+---
+ trace-listen.c | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/trace-listen.c b/trace-listen.c
+index 8b8f02c..0019089 100644
+--- a/trace-listen.c
++++ b/trace-listen.c
+@@ -69,7 +69,7 @@ static void put_temp_file(char *file)
+ 
+ #define MAX_PATH 1024
+ 
+-static void signal_setup(int sig, sighandler_t handle)
++static void signal_setup(int sig, void (*handle)(int))
+ {
+ 	struct sigaction action;
+ 
+-- 
+1.8.3.2
+

@@ -1,0 +1,5 @@
+0001-trace-cmd-listen-Remove-use-of-sighandler_t.patch
+0002-build-Install-data-files-without-execute-permissions.patch
+0003-Add-missing-libgen.h-includes.patch
+0004-Documentation-Add-kernelshark.1.txt.patch
+0005-Makefile-Use-CFLAGS-and-LDFLAGS-when-building-python.patch

@@ -1,3 +1,19 @@
+trace-cmd (2.2.1-2) unstable; urgency=low
+
+  * debian/patches/0001-trace-cmd-Make-_GNU_SOURCE-always-defined.patch:
+    Use this upstream fix instead of
+    debian/patches/0001-trace-cmd-listen-Remove-use-of-sighandler_t.patch
+  * debian/patches/0006-Makefile-Ensure-_GNU_SOURCE-really-is-always-defined.patch:
+    Ensure _GNU_SOURCE is set in the case of CFLAGS being provided via a
+    command argument
+  * Change architecture to linux-any as this package won't work with
+    any other kernels.
+  * Bump Standards-Version to 3.9.5
+  * debian/patches/0007-Makefile-Use-CPPFLAGS-from-the-environment.patch:
+    Use CPPFLAGS from the environment
+
+ -- Seth Forshee <seth.forshee@canonical.com>  Fri, 13 Dec 2013 20:08:28 -0600
+
 trace-cmd (2.2.1-1) unstable; urgency=low
 
   * Update to 2.2.1 upstream release

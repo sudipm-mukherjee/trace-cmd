@@ -1,3 +1,11 @@
+trace-cmd (2.3.0-1) unstable; urgency=low
+
+  * Update to 2.3.0 release
+  * Remove all patches as they have been incorported into the new
+    upstream release
+
+ -- Seth Forshee <seth.forshee@canonical.com>  Mon, 06 Jan 2014 14:58:48 -0600
+
 trace-cmd (2.2.1-2) unstable; urgency=low
 
   * debian/patches/0001-trace-cmd-Make-_GNU_SOURCE-always-defined.patch:

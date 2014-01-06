@@ -16,9 +16,10 @@ static struct usage_help usage_help[] = {
 	{
 		"record",
 		"record a trace into a trace.dat file",
-		" %s record [-v][-e event [-f filter]][-p plugin][-F][-d][-o file] \\\n"
+		" %s record [-v][-e event [-f filter]][-p plugin][-F][-d][-D][-o file] \\\n"
 		"           [-s usecs][-O option ][-l func][-g func][-n func] \\\n"
-		"           [-P pid][-N host:port][-t][-r prio][-b size][command ...]\n"
+		"           [-P pid][-N host:port][-t][-r prio][-b size][-B buf][command ...]\n"
+		"           [-m max]\n"
 		"          -e run command with event enabled\n"
 		"          -f filter for previous -e event\n"
 		"          -p run command with plugin enabled\n"
@@ -29,8 +30,10 @@ static struct usage_help usage_help[] = {
 		"          -l filter function name\n"
 		"          -g set graph function\n"
 		"          -n do not trace function\n"
+		"          -m max size per CPU in kilobytes\n"
 		"          -v will negate all -e after it (disable those events)\n"
 		"          -d disable function tracer when running\n"
+		"          -D Full disable of function tracing (for all users)\n"
 		"          -o data output file [default trace.dat]\n"
 		"          -O option to enable (or disable)\n"
 		"          -r real time priority to run the capture threads\n"
@@ -38,6 +41,7 @@ static struct usage_help usage_help[] = {
 		"          -N host:port to connect to (see listen)\n"
 		"          -t used with -N, forces use of tcp in live trace\n"
 		"          -b change kernel buffersize (in kilobytes per CPU)\n"
+		"          -B create sub buffer and folling events will be enabled here\n"
 		"          -k do not reset the buffers after tracing.\n"
 		"          -i do not fail if an event is not found\n"
 		"          --func-stack perform a stack trace for function tracer\n"
@@ -53,8 +57,9 @@ static struct usage_help usage_help[] = {
 	{
 		"extract",
 		"extract a trace from the kernel",
-		" %s extract [-p plugin][-O option][-o file]\n"
+		" %s extract [-p plugin][-O option][-o file][-s]\n"
 		"          Uses same options as record, but only reads an existing trace.\n"
+		"          -s : extract the snapshot instead of the main buffer\n"
 	},
 	{
 		"stop",
@@ -62,6 +67,18 @@ static struct usage_help usage_help[] = {
 		" %s stop\n"
 		"          Stops the tracer from recording more data.\n"
 		"          Used in conjunction with start\n"
+	},
+	{
+		"show",
+		"show the contents of the kernel tracing buffer",
+		" %s show [-p|-s][-c cpu][-B buf]\n"
+		"          Basically, this is a cat of the trace file.\n"
+		"          -p read the trace_pipe file instead\n"
+		"          -s read the snapshot file instance\n"
+		"           (Can't have both -p and -s)\n"
+		"          -c just show the file associated with a given CPU\n"
+		"          -B read from a tracing buffer instance.\n"
+		"          -f display the file path that is being dumped\n"
 	},
 	{
 		"reset",
@@ -153,6 +170,17 @@ static struct usage_help usage_help[] = {
 		"          -c create a partial trace.dat file only\n"
 		"          -o output file\n"
 		"          -i parital trace.dat file for input\n"
+	},
+	{
+		"snapshot",
+		"take snapshot of running trace",
+		" %s snapshot [-s][-r][-f][-B buf][-c cpu]\n"
+		"          -s take a snapshot of the trace buffer\n"
+		"          -r reset current snapshot\n"
+		"          -f free the snapshot buffer\n"
+		"            without the above three options, display snapshot\n"
+		"          -c operate on the snapshot buffer for the given CPU\n"
+		"          -B operate on the snapshot buffer for a tracing buffer instance.\n"
 	},
 	{
 		"stack",

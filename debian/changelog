@@ -1,3 +1,9 @@
+trace-cmd (2.3.2-1) unstable; urgency=medium
+
+  * Update to upstream 2.3.2 release
+
+ -- Seth Forshee <seth.forshee@canonical.com>  Mon, 10 Mar 2014 06:40:43 -0500
+
 trace-cmd (2.3.1-1) unstable; urgency=medium
 
   * Update to upstream 2.3.1 release

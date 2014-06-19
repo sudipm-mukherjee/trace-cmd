@@ -1,3 +1,13 @@
+trace-cmd (2.4.0-1) unstable; urgency=medium
+
+  * Update to upstream 2.4 release
+  * debian/patches/0001-trace-cmd-Add-missing-mode-to-open-call.patch:
+    Fix error caused by missing mode argument to open(2) with O_CREAT
+  * debian/patches/0002-trace-cmd-Use-python2.7-for-executable-name.patch:
+    Workaround for lintian python-script-but-no-python-dep error
+
+ -- Seth Forshee <seth.forshee@canonical.com>  Thu, 19 Jun 2014 15:34:11 -0500
+
 trace-cmd (2.3.2-1) unstable; urgency=medium
 
   * Update to upstream 2.3.2 release

@@ -384,6 +384,7 @@ static void extract_trace_clock(struct pevent *pevent, char *line)
 	data = strtok_r(line, "[]", &next);
 	sscanf(data, "%ms", &clock);
 	pevent_register_trace_clock(pevent, clock);
+	free(clock);
 }
 
 void parse_trace_clock(struct pevent *pevent,
@@ -687,6 +688,17 @@ char *tracecmd_find_tracing_dir(void)
 
 	sprintf(tracing_dir, "%s/tracing", debugfs);
 
+	return tracing_dir;
+}
+
+const char *tracecmd_get_tracing_dir(void)
+{
+	static const char *tracing_dir;
+
+	if (tracing_dir)
+		return tracing_dir;
+
+	tracing_dir = tracecmd_find_tracing_dir();
 	return tracing_dir;
 }
 

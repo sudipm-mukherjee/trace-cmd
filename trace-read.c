@@ -36,12 +36,12 @@
 #include <errno.h>
 
 #include "trace-local.h"
-#include "trace-hash-local.h"
+#include "trace-hash.h"
 #include "list.h"
 
 static struct filter_str {
 	struct filter_str	*next;
-	const char		*filter;
+	char			*filter;
 	int			neg;
 } *filter_strings;
 static struct filter_str **filter_next = &filter_strings;
@@ -98,6 +98,9 @@ static int show_wakeup;
 static int wakeup_id;
 static int wakeup_new_id;
 static int sched_id;
+static int stacktrace_id;
+
+static int profile;
 
 static int buffer_breaks = 0;
 
@@ -115,13 +118,13 @@ static unsigned long long total_wakeup_rt_lat;
 static unsigned long wakeup_rt_lat_count;
 
 struct wakeup_info {
-	struct wakeup_info	*next;
+	struct trace_hash_item	hash;
 	unsigned long long	start;
 	int			pid;
 };
 
 #define WAKEUP_HASH_SIZE 1024
-static struct wakeup_info *wakeup_hash[WAKEUP_HASH_SIZE];
+static struct trace_hash wakeup_hash;
 
 /* Debug variables for testing tracecmd_read_at */
 #define TEST_READ_AT 0
@@ -291,7 +294,7 @@ static void add_handle(struct tracecmd_input *handle, const char *file)
 	if (file) {
 		item->file = file + strlen(file);
 		/* we want just the base name */
-		while (*item->file != '/' && item->file >= file)
+		while (item->file >= file && *item->file != '/')
 			item->file--;
 		item->file++;
 		if (strlen(item->file) > max_file_size)
@@ -327,7 +330,9 @@ static void add_filter(const char *filter, int neg)
 	struct filter_str *ftr;
 
 	ftr = malloc_or_die(sizeof(*ftr));
-	ftr->filter = filter;
+	ftr->filter = strdup(filter);
+	if (!ftr->filter)
+		die("malloc");
 	ftr->next = NULL;
 	ftr->neg = neg;
 
@@ -454,6 +459,7 @@ static void make_pid_filter(struct tracecmd_input *handle)
 	}
 
 	add_filter(str, 0);
+	free(str);
 
 	while (pid_list) {
 		list = pid_list;
@@ -496,8 +502,6 @@ static void process_filters(struct handle_list *handles)
 			    filter->filter, errstr);
 		}
 
-		free(filter);
-
 		if (filter->neg) {
 			*filter_out_next = event_filter;
 			filter_out_next = &event_filter->next;
@@ -505,13 +509,10 @@ static void process_filters(struct handle_list *handles)
 			*filter_next = event_filter;
 			filter_next = &event_filter->next;
 		}
-	}
-}
 
-static int filter_record(struct tracecmd_input *handle,
-			 struct pevent_record *record)
-{
-	return 0;
+		free(filter->filter);
+		free(filter);
+	}
 }
 
 static void init_wakeup(struct tracecmd_input *handle)
@@ -523,6 +524,8 @@ static void init_wakeup(struct tracecmd_input *handle)
 		return;
 
 	pevent = tracecmd_get_pevent(handle);
+
+	trace_hash_init(&wakeup_hash, WAKEUP_HASH_SIZE);
 
 	event = pevent_find_event_by_name(pevent, "sched", "sched_wakeup");
 	if (!event)
@@ -564,42 +567,24 @@ static void init_wakeup(struct tracecmd_input *handle)
 	show_wakeup = 0;
 }
 
-static unsigned int calc_wakeup_key(unsigned long val)
-{
-	return trace_hash(val) % WAKEUP_HASH_SIZE;
-}
-
-static struct wakeup_info *
-__find_wakeup(unsigned int key, unsigned int val)
-{
-	struct wakeup_info *info = wakeup_hash[key];
-
-	while (info) {
-		if (info->pid == val)
-			return info;
-		info = info->next;
-	}
-
-	return NULL;
-}
-
 static void add_wakeup(unsigned int val, unsigned long long start)
 {
-	unsigned int key = calc_wakeup_key(val);
+	unsigned int key = trace_hash(val);
 	struct wakeup_info *info;
+	struct trace_hash_item *item;
 
-	info = __find_wakeup(key, val);
-	if (info) {
+	item = trace_hash_find(&wakeup_hash, key, NULL, NULL);
+	if (item) {
+		info = container_of(item, struct wakeup_info, hash);
 		/* Hmm, double wakeup? */
 		info->start = start;
 		return;
 	}
 
 	info = malloc_or_die(sizeof(*info));
-	info->pid = val;
+	info->hash.key = val;
 	info->start = start;
-	info->next = wakeup_hash[key];
-	wakeup_hash[key] = info;
+	trace_hash_add(&wakeup_hash, &info->hash);
 }
 
 static unsigned long long max_lat = 0;
@@ -614,14 +599,16 @@ static unsigned long long min_rt_time;
 
 static void add_sched(unsigned int val, unsigned long long end, int rt)
 {
-	unsigned int key = calc_wakeup_key(val);
+	struct trace_hash_item *item;
+	unsigned int key = trace_hash(val);
 	struct wakeup_info *info;
-	struct wakeup_info **next;
 	unsigned long long cal;
 
-	info = __find_wakeup(key, val);
-	if (!info)
+	item = trace_hash_find(&wakeup_hash, key, NULL, NULL);
+	if (!item)
 		return;
+
+	info = container_of(item, struct wakeup_info, hash);
 
 	cal = end - info->start;
 
@@ -655,14 +642,7 @@ static void add_sched(unsigned int val, unsigned long long end, int rt)
 		wakeup_rt_lat_count++;
 	}
 
-	next = &wakeup_hash[key];
-	while (*next) {
-		if (*next == info) {
-			*next = info->next;
-			break;
-		}
-		next = &(*next)->next;
-	}
+	trace_hash_del(item);
 	free(info);
 }
 
@@ -725,7 +705,8 @@ show_wakeup_timings(unsigned long long total, unsigned long count,
 static void finish_wakeup(void)
 {
 	struct wakeup_info *info;
-	int i;
+	struct trace_hash_item **bucket;
+	struct trace_hash_item *item;
 
 	if (!show_wakeup || !wakeup_lat_count)
 		return;
@@ -742,39 +723,42 @@ static void finish_wakeup(void)
 				    min_rt_lat, min_rt_time);
 	}
 
-	for (i = 0; i < WAKEUP_HASH_SIZE; i++) {
-		while (wakeup_hash[i]) {
-			info = wakeup_hash[i];
-			wakeup_hash[i] = info->next;
+	trace_hash_for_each_bucket(bucket, &wakeup_hash) {
+		trace_hash_while_item(item, bucket) {
+			trace_hash_del(item);
+			info = container_of(item, struct wakeup_info, hash);
 			free(info);
 		}
 	}
+
+	trace_hash_free(&wakeup_hash);
 }
 
-static void show_data(struct tracecmd_input *handle,
-		      struct pevent_record *record, int cpu)
+void trace_show_data(struct tracecmd_input *handle, struct pevent_record *record,
+		     int profile)
 {
 	struct pevent *pevent;
 	struct trace_seq s;
+	int cpu = record->cpu;
 	bool use_trace_clock;
-
-	if (filter_record(handle, record))
-		return;
 
 	pevent = tracecmd_get_pevent(handle);
 
 	test_save(record, cpu);
 
+	if (profile) {
+		trace_profile_record(handle, record, cpu);
+		return;
+	}
+
 	trace_seq_init(&s);
 	if (record->missed_events > 0)
 		trace_seq_printf(&s, "CPU:%d [%lld EVENTS DROPPED]\n",
-				 record->cpu, record->missed_events);
+				 cpu, record->missed_events);
 	else if (record->missed_events < 0)
-		trace_seq_printf(&s, "CPU:%d [EVENTS DROPPED]\n",
-				 record->cpu);
+		trace_seq_printf(&s, "CPU:%d [EVENTS DROPPED]\n", cpu);
 	if (buffer_breaks && tracecmd_record_at_buffer_start(handle, record))
-		trace_seq_printf(&s, "CPU:%d [SUBBUFFER START]\n",
-				 record->cpu);
+		trace_seq_printf(&s, "CPU:%d [SUBBUFFER START]\n", cpu);
 
 	use_trace_clock = tracecmd_get_use_trace_clock(handle);
 	pevent_print_event(pevent, &s, record, use_trace_clock);
@@ -824,12 +808,94 @@ test_filters(struct filter *event_filters, struct pevent_record *record, int neg
 	return ret;
 }
 
-static struct pevent_record *
-get_next_record(struct handle_list *handles, int *next_cpu)
+struct stack_info_cpu {
+	int			cpu;
+	int			last_printed;
+};
+
+struct stack_info {
+	struct stack_info	*next;
+	struct handle_list	*handles;
+	struct stack_info_cpu	*cpus;
+	int			stacktrace_id;
+	int			nr_cpus;
+};
+
+static int
+test_stacktrace(struct handle_list *handles, struct pevent_record *record,
+		int last_printed)
+{
+	static struct stack_info *infos;
+	struct stack_info *info;
+	struct stack_info_cpu *cpu_info;
+	struct handle_list *h;
+	struct tracecmd_input *handle;
+	struct event_format *event;
+	struct pevent *pevent;
+	static int init;
+	int ret;
+	int id;
+
+	if (!init) {
+		init = 1;
+
+		list_for_each_entry(h, &handle_list, list) {
+			info = malloc_or_die(sizeof(*info));
+			info->handles = h;
+			info->nr_cpus = tracecmd_cpus(h->handle);
+
+			info->cpus = malloc_or_die(sizeof(*info->cpus) * info->nr_cpus);
+			memset(info->cpus, 0, sizeof(*info->cpus));
+
+			pevent = tracecmd_get_pevent(h->handle);
+			event = pevent_find_event_by_name(pevent, "ftrace",
+							  "kernel_stack");
+			if (event)
+				info->stacktrace_id = event->id;
+			else
+				info->stacktrace_id = 0;
+
+			info->next = infos;
+			infos = info;
+		}
+
+
+	}
+
+	handle = handles->handle;
+	pevent = tracecmd_get_pevent(handle);
+
+	for (info = infos; info; info = info->next)
+		if (info->handles == handles)
+			break;
+
+	if (!info->stacktrace_id)
+		return 0;
+
+	cpu_info = &info->cpus[record->cpu];
+
+	id = pevent_data_type(pevent, record);
+
+	/*
+	 * Print the stack trace if the previous event was printed.
+	 * But do not print the stack trace if it is explicitly
+	 * being filtered out.
+	 */
+	if (id == info->stacktrace_id) {
+		ret = test_filters(handles->event_filter_out, record, 1);
+		if (ret != FILTER_MATCH)
+			return cpu_info->last_printed;
+		return 0;
+	}
+
+	cpu_info->last_printed = last_printed;
+	return 0;
+}
+
+static struct pevent_record *get_next_record(struct handle_list *handles)
 {
 	struct pevent_record *record;
 	int found = 0;
-	int next;
 	int cpu;
 	int ret;
 
@@ -840,7 +906,6 @@ get_next_record(struct handle_list *handles, int *next_cpu)
 		return NULL;
 
 	do {
-		next = -1;
 		if (filter_cpus) {
 			long long last_stamp = -1;
 			struct pevent_record *precord;
@@ -867,8 +932,17 @@ get_next_record(struct handle_list *handles, int *next_cpu)
 		if (record) {
 			ret = test_filters(handles->event_filters, record, 0);
 			switch (ret) {
+			case FILTER_NOEXIST:
+				/* Stack traces may still filter this */
+				if (stacktrace_id &&
+				    test_stacktrace(handles, record, 0))
+					found = 1;
+				else
+					free_record(record);
+				break;
 			case FILTER_NONE:
 			case FILTER_MATCH:
+				/* Test the negative filters (-v) */
 				ret = test_filters(handles->event_filter_out, record, 1);
 				if (ret != FILTER_MATCH) {
 					found = 1;
@@ -881,10 +955,12 @@ get_next_record(struct handle_list *handles, int *next_cpu)
 		}
 	} while (record && !found);
 
+	if (record && stacktrace_id)
+		test_stacktrace(handles, record, 1);
+
 	handles->record = record;
 	if (!record)
 		handles->done = 1;
-	*next_cpu = next;
 
 	return record;
 }
@@ -928,9 +1004,9 @@ static void read_data_info(struct list_head *handle_list, int stat_only)
 	struct handle_list *last_handle;
 	struct pevent_record *record;
 	struct pevent_record *last_record;
-	int last_cpu;
+	struct event_format *event;
+	struct pevent *pevent;
 	int cpus;
-	int next;
 	int ret;
 
 	list_for_each_entry(handles, handle_list, list) {
@@ -964,7 +1040,15 @@ static void read_data_info(struct list_head *handle_list, int stat_only)
 			continue;
 		}
 
+		/* Find the kernel_stacktrace if available */
+		pevent = tracecmd_get_pevent(handles->handle);
+		event = pevent_find_event_by_name(pevent, "ftrace", "kernel_stack");
+		if (event)
+			stacktrace_id = event->id;
+
 		init_wakeup(handles->handle);
+		trace_init_profile(handles->handle);
+
 		process_filters(handles);
 
 		/* If this file has buffer instances, get the handles for them */
@@ -996,20 +1080,22 @@ static void read_data_info(struct list_head *handle_list, int stat_only)
 		last_record = NULL;
 
 		list_for_each_entry(handles, handle_list, list) {
-			record = get_next_record(handles, &next);
+			record = get_next_record(handles);
 			if (!last_record ||
 			    (record && record->ts < last_record->ts)) {
 				last_record = record;
 				last_handle = handles;
-				last_cpu = next;
 			}
 		}
 		if (last_record) {
 			print_handle_file(last_handle);
-			show_data(last_handle->handle, last_record, last_cpu);
+			trace_show_data(last_handle->handle, last_record, profile);
 			free_handle_record(last_handle);
 		}
 	} while (last_record);
+
+	if (profile)
+		trace_profile();
 
 	list_for_each_entry(handles, handle_list, list) {
 		free_filters(handles->event_filters);
@@ -1156,6 +1242,7 @@ static void set_event_flags(struct pevent *pevent, struct event_str *list,
 }
 
 enum {
+	OPT_profile	= 245,
 	OPT_event	= 246,
 	OPT_comm	= 247,
 	OPT_boundary	= 248,
@@ -1223,6 +1310,7 @@ void trace_report (int argc, char **argv)
 			{"nodate", no_argument, NULL, OPT_nodate},
 			{"stat", no_argument, NULL, OPT_stat},
 			{"boundary", no_argument, NULL, OPT_boundary},
+			{"profile", no_argument, NULL, OPT_profile},
 			{"help", no_argument, NULL, '?'},
 			{NULL, 0, NULL, 0}
 		};
@@ -1339,6 +1427,9 @@ void trace_report (int argc, char **argv)
 		case OPT_boundary:
 			/* Debug to look at buffer breaks */
 			buffer_breaks = 1;
+			break;
+		case OPT_profile:
+			profile = 1;
 			break;
 		default:
 			usage(argv);

@@ -1,3 +1,11 @@
+trace-cmd (2.5.1-1) unstable; urgency=medium
+
+  * Update to upstream 2.5.1 release
+  * Drop 0001-trace-cmd-Add-missing-mode-to-open-call.patch as it is
+    included in the new upstream release
+
+ -- Seth Forshee <seth.forshee@canonical.com>  Thu, 05 Feb 2015 08:19:04 -0600
+
 trace-cmd (2.4.0-1) unstable; urgency=medium
 
   * Update to upstream 2.4 release

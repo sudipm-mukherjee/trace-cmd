@@ -20,10 +20,15 @@
 #ifndef __TRACE_LOCAL_H
 #define __TRACE_LOCAL_H
 
+#include <sys/types.h>
+#include <dirent.h>	/* for DIR */
+
 #include "trace-cmd.h"
 
 /* fix stupid glib guint64 typecasts and printf formats */
 typedef unsigned long long u64;
+
+struct buffer_instance;
 
 /* for local shared information with trace-cmd executable */
 
@@ -31,6 +36,16 @@ void usage(char **argv);
 
 extern int silence_warnings;
 extern int show_status;
+
+struct pid_record_data {
+	int			pid;
+	int			brass[2];
+	int			cpu;
+	int			closed;
+	struct tracecmd_input	*stream;
+	struct buffer_instance	*instance;
+	struct pevent_record	*record;
+};
 
 void show_file(const char *name);
 
@@ -57,6 +72,63 @@ void trace_snapshot(int argc, char **argv);
 
 void trace_mem(int argc, char **argv);
 
+void trace_stat(int argc, char **argv);
+
+int trace_profile_record(struct tracecmd_input *handle,
+			 struct pevent_record *record, int cpu);
+void trace_init_profile(struct tracecmd_input *handle);
+int trace_profile(void);
+
+struct tracecmd_input *
+trace_stream_init(struct buffer_instance *instance, int cpu, int fd, int cpus,
+		  int profile);
+int trace_stream_read(struct pid_record_data *pids, int nr_pids, struct timeval *tv,
+		      int profile);
+
+void trace_show_data(struct tracecmd_input *handle, struct pevent_record *record,
+		     int profile);
+
+/* --- event interation --- */
+
+/*
+ * Use this to iterate through the event directories
+ */
+
+
+enum event_process {
+	PROCESSED_NONE,
+	PROCESSED_EVENT,
+	PROCESSED_SYSTEM
+};
+
+enum process_type {
+	PROCESS_EVENT,
+	PROCESS_SYSTEM
+};
+
+struct event_iter {
+	DIR *system_dir;
+	DIR *event_dir;
+	struct dirent *system_dent;
+	struct dirent *event_dent;
+};
+
+enum event_iter_type {
+	EVENT_ITER_NONE,
+	EVENT_ITER_SYSTEM,
+	EVENT_ITER_EVENT
+};
+
+struct event_iter *trace_event_iter_alloc(const char *path);
+enum event_iter_type trace_event_iter_next(struct event_iter *iter,
+					   const char *path, const char *system);
+void trace_event_iter_free(struct event_iter *iter);
+
+char *append_file(const char *dir, const char *name);
+char *get_file_content(const char *file);
+
+char *strstrip(char *str);
+
 /* --- instance manipulation --- */
 
 struct func_list {
@@ -79,12 +151,17 @@ struct buffer_instance {
 	struct func_list	*filter_funcs;
 	struct func_list	*notrace_funcs;
 
+	const char		*clock;
+
 	struct trace_seq	*s;
+
+	struct tracecmd_input	*handle;
 
 	int			tracing_on_init_val;
 	int			tracing_on_fd;
 	int			keep;
 	int			buffer_size;
+	int			profile;
 };
 
 extern struct buffer_instance top_instance;
@@ -100,5 +177,6 @@ void add_instance(struct buffer_instance *instance);
 char *get_instance_file(struct buffer_instance *instance, const char *file);
 
 void show_instance_file(struct buffer_instance *instance, const char *name);
+int count_cpus(void);
 
 #endif /* __TRACE_LOCAL_H */

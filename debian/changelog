@@ -1,3 +1,10 @@
+trace-cmd (2.5.3-1) unstable; urgency=medium
+
+  * Bump Standards-Version to 3.9.6
+  * Update to upstream 2.5.3 release
+
+ -- Seth Forshee <seth.forshee@canonical.com>  Mon, 09 Mar 2015 09:30:02 -0500
+
 trace-cmd (2.5.1-1) unstable; urgency=medium
 
   * Update to upstream 2.5.1 release

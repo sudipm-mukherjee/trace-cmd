@@ -1,7 +1,7 @@
 # trace-cmd version
 TC_VERSION = 2
 TC_PATCHLEVEL = 5
-TC_EXTRAVERSION = 1
+TC_EXTRAVERSION = 3
 
 # Kernel Shark version
 KS_VERSION = 0
@@ -320,7 +320,7 @@ PEVENT_LIB_OBJS = event-parse.o trace-seq.o parse-filter.o parse-utils.o
 TCMD_LIB_OBJS = $(PEVENT_LIB_OBJS) trace-util.o trace-input.o trace-ftrace.o \
 			trace-output.o trace-record.o trace-recorder.o \
 			trace-restore.o trace-usage.o trace-blk-hack.o \
-			kbuffer-parse.o event-plugin.o
+			kbuffer-parse.o event-plugin.o trace-hooks.o
 
 PLUGIN_OBJS =
 PLUGIN_OBJS += plugin_jbd2.o

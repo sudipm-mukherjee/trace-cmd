@@ -97,10 +97,12 @@ struct tracecmd_input {
 	struct cpu_data 	*cpu_data;
 	unsigned long long	ts_offset;
 	char *			cpustats;
+	char *			uname;
 	struct input_buffer_instance	*buffers;
 
 	struct tracecmd_ftrace	finfo;
 
+	struct hook_list	*hooks;
 	/* file information */
 	size_t			header_files_start;
 	size_t			ftrace_files_start;
@@ -1930,6 +1932,7 @@ static int handle_options(struct tracecmd_input *handle)
 	char *cpustats = NULL;
 	unsigned int cpustats_size = 0;
 	struct input_buffer_instance *buffer;
+	struct hook_list *hook;
 	char *buf;
 
 	for (;;) {
@@ -1987,6 +1990,14 @@ static int handle_options(struct tracecmd_input *handle)
 			break;
 		case TRACECMD_OPTION_TRACECLOCK:
 			handle->use_trace_clock = true;
+			break;
+		case TRACECMD_OPTION_UNAME:
+			handle->uname = strdup(buf);
+			break;
+		case TRACECMD_OPTION_HOOK:
+			hook = tracecmd_create_event_hook(buf);
+			hook = handle->hooks;
+			handle->hooks = hook;
 			break;
 		default:
 			warning("unknown option %d", option);
@@ -2303,6 +2314,35 @@ void tracecmd_print_stats(struct tracecmd_input *handle)
 }
 
 /**
+ * tracecmd_print_uname - prints the recorded uname if it was recorded
+ * @handle: input handle for the trace.dat file
+ *
+ * Looks for the option TRACECMD_OPTION_UNAME and prints out what's
+ * stored there, if it is found. Otherwise it prints that none were found.
+ */
+void tracecmd_print_uname(struct tracecmd_input *handle)
+{
+	if (handle->uname)
+		printf("%s\n", handle->uname);
+	else
+		printf(" uname was not recorded in this file\n");
+}
+
+/**
+ * tracecmd_hooks - return the event hooks that were used in record
+ * @handle: input handle for the trace.dat file
+ *
+ * If trace-cmd record used -H to save hooks, they are parsed and
+ * presented as hooks here.
+ *
+ * Returns the hook list (do not free it, they are freed on close)
+ */
+struct hook_list *tracecmd_hooks(struct tracecmd_input *handle)
+{
+	return handle->hooks;
+}
+
+/**
  * tracecmd_alloc_fd - create a tracecmd_input handle from a file descriptor
  * @fd: the file descriptor for the trace.dat file
  *
@@ -2503,7 +2543,11 @@ void tracecmd_close(struct tracecmd_input *handle)
 
 	free(handle->cpustats);
 	free(handle->cpu_data);
+	free(handle->uname);
 	close(handle->fd);
+
+	tracecmd_free_hooks(handle->hooks);
+	handle->hooks = NULL;
 
 	if (handle->flags & TRACECMD_FL_BUFFER_INSTANCE)
 		tracecmd_close(handle->parent);
@@ -2758,7 +2802,7 @@ int tracecmd_record_at_buffer_start(struct tracecmd_input *handle,
 				    struct pevent_record *record)
 {
 	struct page *page = record->priv;
-	struct kbuffer *kbuf = handle->cpu_data[0].kbuf;
+	struct kbuffer *kbuf = handle->cpu_data[record->cpu].kbuf;
 	int offset;
 
 	if (!page || !kbuf)
@@ -2807,6 +2851,10 @@ tracecmd_buffer_instance_handle(struct tracecmd_input *handle, int indx)
 	new_handle->ref = 1;
 	new_handle->parent = handle;
 	new_handle->cpustats = NULL;
+	new_handle->hooks = NULL;
+	if (handle->uname)
+		/* Ignore if fails to malloc, no biggy */
+		new_handle->uname = strdup(handle->uname);
 	tracecmd_ref(handle);
 
 	new_handle->fd = dup(handle->fd);

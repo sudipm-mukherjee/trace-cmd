@@ -24,7 +24,7 @@
 
 #include "trace-cmd.h"
 
-struct plugin_option trace_ftrace_options[] = {
+struct pevent_plugin_option trace_ftrace_options[] = {
 	{
 		.name = "tailprint",
 		.plugin_alias = "fgraph",
@@ -42,8 +42,8 @@ struct plugin_option trace_ftrace_options[] = {
 	}
 };
 
-static struct plugin_option *fgraph_tail = &trace_ftrace_options[0];
-static struct plugin_option *fgraph_depth = &trace_ftrace_options[1];
+static struct pevent_plugin_option *fgraph_tail = &trace_ftrace_options[0];
+static struct pevent_plugin_option *fgraph_depth = &trace_ftrace_options[1];
 
 static void find_long_size(struct tracecmd_ftrace *finfo)
 {
@@ -147,11 +147,19 @@ static void print_graph_overhead(struct trace_seq *s,
 	if (duration == ~0ULL)
 		return (void)trace_seq_printf(s, "  ");
 
-	/* Duration exceeded 100 msecs */
+	/* Duration exceeded 1 sec */
+	if (duration > 1000000000ULL)
+		return (void)trace_seq_printf(s, "$ ");
+
+	/* Duration exceeded 1000 usecs */
+	if (duration > 1000000ULL)
+		return (void)trace_seq_printf(s, "# ");
+
+	/* Duration exceeded 100 usecs */
 	if (duration > 100000ULL)
 		return (void)trace_seq_printf(s, "! ");
 
-	/* Duration exceeded 10 msecs */
+	/* Duration exceeded 10 usecs */
 	if (duration > 10000ULL)
 		return (void)trace_seq_printf(s, "+ ");
 

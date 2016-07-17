@@ -37,6 +37,7 @@
 
 #include "trace-local.h"
 #include "trace-hash.h"
+#include "kbuffer.h"
 #include "list.h"
 
 static struct filter_str {
@@ -103,6 +104,7 @@ static int stacktrace_id;
 static int profile;
 
 static int buffer_breaks = 0;
+static int debug = 0;
 
 static struct format_field *wakeup_task;
 static struct format_field *wakeup_success;
@@ -760,13 +762,58 @@ void trace_show_data(struct tracecmd_input *handle, struct pevent_record *record
 				 cpu, record->missed_events);
 	else if (record->missed_events < 0)
 		trace_seq_printf(&s, "CPU:%d [EVENTS DROPPED]\n", cpu);
-	if (buffer_breaks && tracecmd_record_at_buffer_start(handle, record))
-		trace_seq_printf(&s, "CPU:%d [SUBBUFFER START]\n", cpu);
-
+	if (buffer_breaks || debug) {
+		if (tracecmd_record_at_buffer_start(handle, record)) {
+			trace_seq_printf(&s, "CPU:%d [SUBBUFFER START]", cpu);
+			if (debug)
+				trace_seq_printf(&s, " [%lld]",
+						 tracecmd_page_ts(handle, record));
+			trace_seq_putc(&s, '\n');
+		}
+	}
 	use_trace_clock = tracecmd_get_use_trace_clock(handle);
 	pevent_print_event(pevent, &s, record, use_trace_clock);
 	if (s.len && *(s.buffer + s.len - 1) == '\n')
 		s.len--;
+	if (debug) {
+		struct kbuffer *kbuf;
+		struct kbuffer_raw_info info;
+		void *page;
+		void *offset;
+
+		trace_seq_printf(&s, " [%d]",
+				 tracecmd_record_ts_delta(handle, record));
+		kbuf = tracecmd_record_kbuf(handle, record);
+		page = tracecmd_record_page(handle, record);
+		offset = tracecmd_record_offset(handle, record);
+
+		if (kbuf && page && offset) {
+			struct kbuffer_raw_info *pi = &info;
+
+			/* We need to get the record raw data to get next */
+			pi->next = offset;
+			pi = kbuffer_raw_get(kbuf, page, pi);
+			while ((pi = kbuffer_raw_get(kbuf, page, pi))) {
+				if (pi->type < KBUFFER_TYPE_PADDING)
+					break;
+				switch (pi->type) {
+				case KBUFFER_TYPE_PADDING:
+					trace_seq_printf(&s, "\n PADDING: ");
+					break;
+				case KBUFFER_TYPE_TIME_EXTEND:
+					trace_seq_printf(&s, "\n TIME EXTEND: ");
+					break;
+				case KBUFFER_TYPE_TIME_STAMP:
+					trace_seq_printf(&s, "\n TIME STAMP?: ");
+					break;
+				}
+				trace_seq_printf(&s, "delta:%lld length:%d",
+						 pi->delta,
+						 pi->length);
+			}
+		}
+	}
+		
 	trace_seq_do_printf(&s);
 	trace_seq_destroy(&s);
 
@@ -1007,7 +1054,8 @@ enum output_type {
 	OUTPUT_UNAME_ONLY,
 };
 
-static void read_data_info(struct list_head *handle_list, enum output_type otype)
+static void read_data_info(struct list_head *handle_list, enum output_type otype,
+			   int global)
 {
 	struct handle_list *handles;
 	struct handle_list *last_handle;
@@ -1064,7 +1112,9 @@ static void read_data_info(struct list_head *handle_list, enum output_type otype
 		init_wakeup(handles->handle);
 		if (last_hook)
 			last_hook->next = tracecmd_hooks(handles->handle);
-		trace_init_profile(handles->handle, hooks);
+		else
+			hooks = tracecmd_hooks(handles->handle);
+		trace_init_profile(handles->handle, hooks, global);
 
 		process_filters(handles);
 
@@ -1271,6 +1321,8 @@ static void add_hook(const char *arg)
 }
 
 enum {
+	OPT_bycomm	= 242,
+	OPT_debug	= 243,
 	OPT_uname	= 244,
 	OPT_profile	= 245,
 	OPT_event	= 246,
@@ -1310,6 +1362,7 @@ void trace_report (int argc, char **argv)
 	int test_filters = 0;
 	int nanosec = 0;
 	int no_date = 0;
+	int global = 0;
 	int raw = 0;
 	int neg = 0;
 	int ret = 0;
@@ -1342,13 +1395,15 @@ void trace_report (int argc, char **argv)
 			{"nodate", no_argument, NULL, OPT_nodate},
 			{"stat", no_argument, NULL, OPT_stat},
 			{"boundary", no_argument, NULL, OPT_boundary},
+			{"debug", no_argument, NULL, OPT_debug},
 			{"profile", no_argument, NULL, OPT_profile},
 			{"uname", no_argument, NULL, OPT_uname},
+			{"by-comm", no_argument, NULL, OPT_bycomm},
 			{"help", no_argument, NULL, '?'},
 			{NULL, 0, NULL, 0}
 		};
 
-		c = getopt_long (argc-1, argv+1, "+hi:H:fepRr:tPNn:LlEwF:VvTqO:",
+		c = getopt_long (argc-1, argv+1, "+hi:H:feGpRr:tPNn:LlEwF:VvTqO:",
 			long_options, &option_index);
 		if (c == -1)
 			break;
@@ -1400,6 +1455,9 @@ void trace_report (int argc, char **argv)
 			break;
 		case 'E':
 			show_events = 1;
+			break;
+		case 'G':
+			global = 1;
 			break;
 		case 'R':
 			raw = 1;
@@ -1464,11 +1522,18 @@ void trace_report (int argc, char **argv)
 			/* Debug to look at buffer breaks */
 			buffer_breaks = 1;
 			break;
+		case OPT_debug:
+			buffer_breaks = 1;
+			debug = 1;
+			break;
 		case OPT_profile:
 			profile = 1;
 			break;
 		case OPT_uname:
 			show_uname = 1;
+			break;
+		case OPT_bycomm:
+			trace_profile_set_merge_like_comms();
 			break;
 		default:
 			usage(argv);
@@ -1589,7 +1654,7 @@ void trace_report (int argc, char **argv)
 	/* yeah yeah, uname overrides stat */
 	if (show_uname)
 		otype = OUTPUT_UNAME_ONLY;
-	read_data_info(&handle_list, otype);
+	read_data_info(&handle_list, otype, global);
 
 	list_for_each_entry(handles, &handle_list, list) {
 		tracecmd_close(handles->handle);

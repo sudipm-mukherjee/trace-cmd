@@ -78,12 +78,14 @@ struct hook_list;
 
 int trace_profile_record(struct tracecmd_input *handle,
 			 struct pevent_record *record, int cpu);
-void trace_init_profile(struct tracecmd_input *handle, struct hook_list *hooks);
+void trace_init_profile(struct tracecmd_input *handle, struct hook_list *hooks,
+			int global);
 int trace_profile(void);
+void trace_profile_set_merge_like_comms(void);
 
 struct tracecmd_input *
 trace_stream_init(struct buffer_instance *instance, int cpu, int fd, int cpus,
-		  int profile, struct hook_list *hooks);
+		  int profile, struct hook_list *hooks, int global);
 int trace_stream_read(struct pid_record_data *pids, int nr_pids, struct timeval *tv,
 		      int profile);
 
@@ -155,7 +157,8 @@ struct buffer_instance {
 
 	const char		*clock;
 
-	struct trace_seq	*s;
+	struct trace_seq	*s_save;
+	struct trace_seq	*s_print;
 
 	struct tracecmd_input	*handle;
 
@@ -174,9 +177,10 @@ extern struct buffer_instance *first_instance;
 #define for_all_instances(i) for (i = first_instance; i; \
 				  i = i == &top_instance ? buffer_instances : (i)->next)
 
-struct buffer_instance *create_instance(char *name);
+struct buffer_instance *create_instance(const char *name);
 void add_instance(struct buffer_instance *instance);
 char *get_instance_file(struct buffer_instance *instance, const char *file);
+void update_first_instance(struct buffer_instance *instance, int topt);
 
 void show_instance_file(struct buffer_instance *instance, const char *name);
 int count_cpus(void);

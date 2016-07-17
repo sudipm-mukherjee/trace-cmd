@@ -23,9 +23,16 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-
+#ifndef NO_AUDIT
+#include <libaudit.h>
+#endif
 #include "trace-local.h"
 #include "trace-hash.h"
+
+#ifdef WARN_NO_AUDIT
+# warning "lib audit not found, using raw syscalls "	\
+	"(install libaudit-devel and try again)"
+#endif
 
 #define TASK_STATE_TO_CHAR_STR "RSDTtXZxKWP"
 #define TASK_STATE_MAX		1024
@@ -34,6 +41,7 @@
 #define start_from_item(item)	container_of(item, struct start_data, hash)
 #define event_from_item(item)	container_of(item, struct event_hash, hash)
 #define stack_from_item(item)	container_of(item, struct stack_data, hash)
+#define group_from_item(item)	container_of(item, struct group_data, hash)
 #define event_data_from_item(item)	container_of(item, struct event_data, hash)
 
 static unsigned long long nsecs_per_sec(unsigned long long ts)
@@ -87,6 +95,7 @@ struct event_data {
 	handle_event_func	handle_event;
 	void			*private;
 	int			migrate;	/* start/end pairs can migrate cpus */
+	int			global;		/* use global tasks */
 	enum event_data_type	type;
 };
 
@@ -140,6 +149,12 @@ struct event_hash {
 	struct trace_hash	stacks;
 };
 
+struct group_data {
+	struct trace_hash_item	hash;
+	char			*comm;
+	struct trace_hash	event_hash;
+};
+
 struct task_data {
 	struct trace_hash_item	hash;
 	int			pid;
@@ -155,6 +170,7 @@ struct task_data {
 	struct event_hash	*last_event;
 	struct pevent_record	*last_stack;
 	struct handle_data	*handle;
+	struct group_data	*group;
 };
 
 struct cpu_info {
@@ -172,6 +188,7 @@ struct handle_data {
 	struct pevent		*pevent;
 
 	struct trace_hash	events;
+	struct trace_hash	group_hash;
 
 	struct cpu_info		**cpu_data;
 
@@ -187,11 +204,20 @@ struct handle_data {
 	struct list_head	*cpu_starts;
 	struct list_head	migrate_starts;
 
+	struct task_data	*global_task;
+	struct task_data	*global_percpu_tasks;
+
 	int			cpus;
 };
 
 static struct handle_data *handles;
 static struct event_data *stacktrace_event;
+static bool merge_like_comms = false;
+
+void trace_profile_set_merge_like_comms(void)
+{
+	merge_like_comms = true;
+}
 
 static struct start_data *
 add_start(struct task_data *task,
@@ -445,6 +471,14 @@ static int match_task(struct trace_hash_item *item, void *data)
 	return task->pid == pid;
 }
 
+static void init_task(struct handle_data *h, struct task_data *task)
+{
+	task->handle = h;
+
+	trace_hash_init(&task->start_hash, 16);
+	trace_hash_init(&task->event_hash, 32);
+}
+
 static struct task_data *
 add_task(struct handle_data *h, int pid)
 {
@@ -453,13 +487,12 @@ add_task(struct handle_data *h, int pid)
 
 	task = malloc_or_die(sizeof(*task));
 	memset(task, 0, sizeof(*task));
+
 	task->pid = pid;
 	task->hash.key = key;
 	trace_hash_add(&h->task_hash, &task->hash);
-	task->handle = h;
 
-	trace_hash_init(&task->start_hash, 16);
-	trace_hash_init(&task->event_hash, 32);
+	init_task(h, task);
 
 	return task;
 }
@@ -484,6 +517,14 @@ find_task(struct handle_data *h, int pid)
 
 	return last_task;
 }
+
+static int match_group(struct trace_hash_item *item, void *data)
+{
+	struct group_data *group = group_from_item(item);
+
+	return strcmp(group->comm, (char *)data) == 0;
+}
+
 
 static void
 add_task_comm(struct task_data *task, struct format_field *field,
@@ -548,6 +589,13 @@ static struct task_data *
 find_event_task(struct handle_data *h, struct event_data *event_data,
 		struct pevent_record *record, unsigned long long pid)
 {
+	if (event_data->global) {
+		if (event_data->migrate)
+			return h->global_task;
+		else
+			return &h->global_percpu_tasks[record->cpu];
+	}
+
 	/* If pid_field is defined, use that to find the task */
 	if (event_data->pid_field)
 		pevent_read_number_field(event_data->pid_field,
@@ -746,7 +794,7 @@ static void
 mate_events(struct handle_data *h, struct event_data *start,
 	    const char *pid_field, const char *end_match_field,
 	    struct event_data *end, const char *start_match_field,
-	    int migrate)
+	    int migrate, int global)
 {
 	start->end = end;
 	end->start = start;
@@ -771,6 +819,9 @@ mate_events(struct handle_data *h, struct event_data *start,
 		    end->event->name, start_match_field);
 
 	start->migrate = migrate;
+	start->global = global;
+	end->migrate = migrate;
+	end->global = global;
 }
 
 /**
@@ -782,13 +833,14 @@ mate_events(struct handle_data *h, struct event_data *start,
  * @end_event: The event that ends the transaction
  * @start_match_field: The end event field that matches start's @end_match_field
  * @migrate: Can the transaction switch CPUs? 1 for yes, 0 for no
+ * @global: The events are global and not per task
  */
 void tracecmd_mate_events(struct tracecmd_input *handle,
 			  struct event_format *start_event,
 			  const char *pid_field, const char *end_match_field,
 			  struct event_format *end_event,
 			  const char *start_match_field,
-			  int migrate)
+			  int migrate, int global)
 {
 	struct handle_data *h;
 	struct event_data *start;
@@ -808,7 +860,7 @@ void tracecmd_mate_events(struct tracecmd_input *handle,
 			EVENT_TYPE_USER_MATE);
 
 	mate_events(h, start, pid_field, end_match_field, end, start_match_field,
-		    migrate);
+		    migrate, global);
 }
 
 static void func_print(struct trace_seq *s, struct event_hash *event_hash)
@@ -823,8 +875,22 @@ static void func_print(struct trace_seq *s, struct event_hash *event_hash)
 		trace_seq_printf(s, "func: 0x%llx", event_hash->val);
 }
 
-static void print_int(struct trace_seq *s, struct event_hash *event_hash)
+static void syscall_print(struct trace_seq *s, struct event_hash *event_hash)
 {
+#ifndef NO_AUDIT
+	const char *name = NULL;
+	int machine;
+
+	machine = audit_detect_machine();
+	if (machine < 0)
+		goto fail;
+	name = audit_syscall_to_name(event_hash->val, machine);
+	if (!name)
+		goto fail;
+	trace_seq_printf(s, "syscall:%s", name);
+	return;
+fail:
+#endif
 	trace_seq_printf(s, "%s:%d", event_hash->event_data->event->name,
 			 (int)event_hash->val);
 }
@@ -1114,8 +1180,13 @@ static int handle_sched_wakeup_event(struct handle_data *h,
 		add_task_comm(task, h->wakeup_comm, record);
 
 	/* if the task isn't sleeping, then ignore the wake up */
-	if (!task->sleeping)
+	if (!task->sleeping) {
+		/* Ignore any following stack traces */
+		proxy->proxy = NULL;
+		proxy->last_start = NULL;
+		proxy->last_event = NULL;
 		return 0;
+	}
 
 	/* It's being woken up */
 	task->sleeping = 0;
@@ -1137,7 +1208,8 @@ static int handle_sched_wakeup_event(struct handle_data *h,
 	return 0;
 }
 
-void trace_init_profile(struct tracecmd_input *handle, struct hook_list *hook)
+void trace_init_profile(struct tracecmd_input *handle, struct hook_list *hook,
+			int global)
 {
 	struct pevent *pevent = tracecmd_get_pevent(handle);
 	struct event_format **events;
@@ -1158,6 +1230,7 @@ void trace_init_profile(struct tracecmd_input *handle, struct hook_list *hook)
 	struct event_data *process_exec;
 	struct event_data *start_event;
 	struct event_data *end_event;
+	int ret;
 	int i;
 
 	h = malloc_or_die(sizeof(*h));
@@ -1167,6 +1240,7 @@ void trace_init_profile(struct tracecmd_input *handle, struct hook_list *hook)
 
 	trace_hash_init(&h->task_hash, 1024);
 	trace_hash_init(&h->events, 1024);
+	trace_hash_init(&h->group_hash, 512);
 
 	h->handle = handle;
 	h->pevent = pevent;
@@ -1188,6 +1262,26 @@ void trace_init_profile(struct tracecmd_input *handle, struct hook_list *hook)
 
 	h->cpu_data = malloc_or_die(h->cpus * sizeof(*h->cpu_data));
 	memset(h->cpu_data, 0, h->cpus * sizeof(h->cpu_data));
+
+	h->global_task = malloc_or_die(sizeof(struct task_data));
+	memset(h->global_task, 0, sizeof(struct task_data));
+	init_task(h, h->global_task);
+	h->global_task->comm = strdup("Global Events");
+	if (!h->global_task->comm)
+		die("malloc");
+	h->global_task->pid = -1;
+
+	h->global_percpu_tasks = calloc(h->cpus, sizeof(struct task_data));
+	if (!h->global_percpu_tasks)
+		die("malloc");
+	for (i = 0; i < h->cpus; i++) {
+		init_task(h, &h->global_percpu_tasks[i]);
+		ret = asprintf(&h->global_percpu_tasks[i].comm,
+			       "Global CPU[%d] Events", i);
+		if (ret < 0)
+			die("malloc");
+		h->global_percpu_tasks[i].pid = -1 - i;
+	}
 
 	irq_entry = add_event(h, "irq", "irq_handler_entry", EVENT_TYPE_IRQ);
 	irq_exit = add_event(h, "irq", "irq_handler_exit", EVENT_TYPE_IRQ);
@@ -1246,9 +1340,9 @@ void trace_init_profile(struct tracecmd_input *handle, struct hook_list *hook)
 
 	if (sched_switch && sched_wakeup) {
 		mate_events(h, sched_switch, "prev_pid", "next_pid", 
-			    sched_wakeup, "pid", 1);
+			    sched_wakeup, "pid", 1, 0);
 		mate_events(h, sched_wakeup, "pid", "pid",
-			    sched_switch, "prev_pid", 1);
+			    sched_switch, "prev_pid", 1, 0);
 		sched_wakeup->handle_event = handle_sched_wakeup_event;
 
 		/* The 'success' field may or may not be present */
@@ -1262,7 +1356,7 @@ void trace_init_profile(struct tracecmd_input *handle, struct hook_list *hook)
 	}
 
 	if (irq_entry && irq_exit)
-		mate_events(h, irq_entry, NULL, "irq", irq_exit, "irq", 0);
+		mate_events(h, irq_entry, NULL, "irq", irq_exit, "irq", 0, global);
 
 	if (softirq_entry)
 		softirq_entry->print_func = softirq_print;
@@ -1274,22 +1368,24 @@ void trace_init_profile(struct tracecmd_input *handle, struct hook_list *hook)
 		softirq_raise->print_func = softirq_print;
 
 	if (softirq_entry && softirq_exit)
-		mate_events(h, softirq_entry, NULL, "vec", softirq_exit, "vec", 0);
+		mate_events(h, softirq_entry, NULL, "vec", softirq_exit, "vec",
+			    0, global);
 
 	if (softirq_entry && softirq_raise)
-		mate_events(h, softirq_raise, NULL, "vec", softirq_entry, "vec", 0);
+		mate_events(h, softirq_raise, NULL, "vec", softirq_entry, "vec",
+			    0, global);
 
 	if (fgraph_entry && fgraph_exit) {
-		mate_events(h, fgraph_entry, NULL, "func", fgraph_exit, "func", 1);
+		mate_events(h, fgraph_entry, NULL, "func", fgraph_exit, "func", 1, 0);
 		fgraph_entry->handle_event = handle_fgraph_entry_event;
 		fgraph_exit->handle_event = handle_fgraph_exit_event;
 		fgraph_entry->print_func = func_print;
 	}
 
 	if (syscall_enter && syscall_exit) {
-		mate_events(h, syscall_enter, NULL, "id", syscall_exit, "id", 1);
-		syscall_enter->print_func = print_int;
-		syscall_exit->print_func = print_int;
+		mate_events(h, syscall_enter, NULL, "id", syscall_exit, "id", 1, 0);
+		syscall_enter->print_func = syscall_print;
+		syscall_exit->print_func = syscall_print;
 	}
 
 	events = pevent_list_events(pevent, EVENT_SORT_ID);
@@ -1318,7 +1414,8 @@ void trace_init_profile(struct tracecmd_input *handle, struct hook_list *hook)
 			continue;
 		}
 		mate_events(h, start_event, hook->pid, hook->start_match,
-			    end_event, hook->end_match, hook->migrate);
+			    end_event, hook->end_match, hook->migrate,
+			    hook->global);
 	}
 
 	/* Now add any defined event that we haven't processed */
@@ -1810,6 +1907,10 @@ static int compare_events(const void *a, const void *b)
 		return 1;
 	if (event_data_a->id < event_data_b->id)
 		return -1;
+	if ((*A)->time_total > (*B)->time_total)
+		return -1;
+	if ((*A)->time_total < (*B)->time_total)
+		return 1;
 	return 0;
 }
 
@@ -1822,12 +1923,18 @@ static void output_task(struct handle_data *h, struct task_data *task)
 	int nr_events = 0;
 	int i;
 
+	if (task->group)
+		return;
+
 	if (task->comm)
 		comm = task->comm;
 	else
 		comm = pevent_data_comm_from_pid(h->pevent, task->pid);
 
-	printf("\ntask: %s-%d\n", comm, task->pid);
+	if (task->pid < 0)
+		printf("%s\n", task->comm);
+	else
+		printf("\ntask: %s-%d\n", comm, task->pid);
 
 	trace_hash_for_each_bucket(bucket, &task->event_hash) {
 		trace_hash_for_each_item(item, bucket) {
@@ -1839,6 +1946,39 @@ static void output_task(struct handle_data *h, struct task_data *task)
 
 	i = 0;
 	trace_hash_for_each_bucket(bucket, &task->event_hash) {
+		trace_hash_for_each_item(item, bucket) {
+			events[i++] = event_from_item(item);
+		}
+	}
+
+	qsort(events, nr_events, sizeof(*events), compare_events);
+
+	for (i = 0; i < nr_events; i++)
+		output_event(events[i]);
+
+	free(events);
+}
+
+static void output_group(struct handle_data *h, struct group_data *group)
+{
+	struct trace_hash_item **bucket;
+	struct trace_hash_item *item;
+	struct event_hash **events;
+	int nr_events = 0;
+	int i;
+
+	printf("\ngroup: %s\n", group->comm);
+
+	trace_hash_for_each_bucket(bucket, &group->event_hash) {
+		trace_hash_for_each_item(item, bucket) {
+			nr_events++;
+		}
+	}
+
+	events = malloc_or_die(sizeof(*events) * nr_events);
+
+	i = 0;
+	trace_hash_for_each_bucket(bucket, &group->event_hash) {
 		trace_hash_for_each_item(item, bucket) {
 			events[i++] = event_from_item(item);
 		}
@@ -1864,6 +2004,14 @@ static int compare_tasks(const void *a, const void *b)
 	return 0;
 }
 
+static int compare_groups(const void *a, const void *b)
+{
+	const char *A = a;
+	const char *B = b;
+
+	return strcmp(A, B);
+}
+
 static void free_event_hash(struct event_hash *event_hash)
 {
 	struct trace_hash_item **bucket;
@@ -1881,7 +2029,7 @@ static void free_event_hash(struct event_hash *event_hash)
 	free(event_hash);
 }
 
-static void free_task(struct task_data *task)
+static void __free_task(struct task_data *task)
 {
 	struct trace_hash_item **bucket;
 	struct trace_hash_item *item;
@@ -1913,11 +2061,43 @@ static void free_task(struct task_data *task)
 
 	if (task->last_stack)
 		free_record(task->last_stack);
+}
 
+static void free_task(struct task_data *task)
+{
+	__free_task(task);
 	free(task);
 }
 
-static void output_handle(struct handle_data *h)
+static void free_group(struct group_data *group)
+{
+	struct trace_hash_item **bucket;
+	struct trace_hash_item *item;
+	struct event_hash *event_hash;
+
+	free(group->comm);
+
+	trace_hash_for_each_bucket(bucket, &group->event_hash) {
+		trace_hash_while_item(item, bucket) {
+			event_hash = event_from_item(item);
+			trace_hash_del(item);
+			free_event_hash(event_hash);
+		}
+	}
+	trace_hash_free(&group->event_hash);
+	free(group);
+}
+
+static void show_global_task(struct handle_data *h,
+			     struct task_data *task)
+{
+	if (trace_hash_empty(&task->event_hash))
+		return;
+
+	output_task(h, task);
+}
+
+static void output_tasks(struct handle_data *h)
 {
 	struct trace_hash_item **bucket;
 	struct trace_hash_item *item;
@@ -1952,11 +2132,213 @@ static void output_handle(struct handle_data *h)
 	free(tasks);
 }
 
+static void output_groups(struct handle_data *h)
+{
+	struct trace_hash_item **bucket;
+	struct trace_hash_item *item;
+	struct group_data **groups;
+	int nr_groups = 0;
+	int i;
+
+	trace_hash_for_each_bucket(bucket, &h->group_hash) {
+		trace_hash_for_each_item(item, bucket) {
+			nr_groups++;
+		}
+	}
+
+	if (nr_groups == 0)
+		return;
+
+	groups = malloc_or_die(sizeof(*groups) * nr_groups);
+
+	nr_groups = 0;
+
+	trace_hash_for_each_bucket(bucket, &h->group_hash) {
+		trace_hash_while_item(item, bucket) {
+			groups[nr_groups++] = group_from_item(item);
+			trace_hash_del(item);
+		}
+	}
+
+	qsort(groups, nr_groups, sizeof(*groups), compare_groups);
+
+	for (i = 0; i < nr_groups; i++) {
+		output_group(h, groups[i]);
+		free_group(groups[i]);
+	}
+
+	free(groups);
+}
+
+static void output_handle(struct handle_data *h)
+{
+	int i;
+
+	show_global_task(h, h->global_task);
+	for (i = 0; i < h->cpus; i++)
+		show_global_task(h, &h->global_percpu_tasks[i]);
+
+	output_groups(h);
+	output_tasks(h);
+}
+
+static void merge_event_stack(struct event_hash *event,
+			      struct stack_data *stack)
+{
+	struct stack_data *exist;
+	struct trace_hash_item *item;
+	struct stack_match match;
+
+	match.caller = stack->caller;
+	match.size = stack->size;
+	item = trace_hash_find(&event->stacks, stack->hash.key, match_stack,
+			       &match);
+	if (!item) {
+		trace_hash_add(&event->stacks, &stack->hash);
+		return;
+	}
+	exist = stack_from_item(item);
+	exist->count += stack->count;
+	exist->time += stack->time;
+
+	if (exist->time_max < stack->time_max) {
+		exist->time_max = stack->time_max;
+		exist->ts_max = stack->ts_max;
+	}
+	if (exist->time_min > stack->time_min) {
+		exist->time_min = stack->time_min;
+		exist->ts_min = stack->ts_min;
+	}
+	free(stack);
+}
+
+static void merge_stacks(struct event_hash *exist, struct event_hash *event)
+{
+	struct stack_data *stack;
+	struct trace_hash_item *item;
+	struct trace_hash_item **bucket;
+
+	trace_hash_for_each_bucket(bucket, &event->stacks) {
+		trace_hash_while_item(item, bucket) {
+			stack = stack_from_item(item);
+			trace_hash_del(&stack->hash);
+			merge_event_stack(exist, stack);
+		}
+	}
+}
+
+static void merge_event_into_group(struct group_data *group,
+				   struct event_hash *event)
+{
+	struct event_hash *exist;
+	struct trace_hash_item *item;
+	struct event_data_match edata;
+	unsigned long long key;
+
+	if (event->event_data->type == EVENT_TYPE_WAKEUP) {
+		edata.event_data = event->event_data;
+		event->search_val = 0;
+		event->val = 0;
+		key = trace_hash((unsigned long)event->event_data);
+	} else if (event->event_data->type == EVENT_TYPE_SCHED_SWITCH) {
+		edata.event_data = event->event_data;
+		event->search_val = event->val;
+		key = (unsigned long)event->event_data +
+			((unsigned long)event->val * 2);
+		key = trace_hash(key);
+	} else {
+		key = event->hash.key;
+	}
+
+	edata.event_data = event->event_data;
+	edata.search_val = event->search_val;
+	edata.val = event->val;
+
+	item = trace_hash_find(&group->event_hash, key, match_event, &edata);
+	if (!item) {
+		event->hash.key = key;
+		trace_hash_add(&group->event_hash, &event->hash);
+		return;
+	}
+
+	exist = event_from_item(item);
+	exist->count += event->count;
+	exist->time_total += event->time_total;
+
+	if (exist->time_max < event->time_max) {
+		exist->time_max = event->time_max;
+		exist->ts_max = event->ts_max;
+	}
+	if (exist->time_min > event->time_min) {
+		exist->time_min = event->time_min;
+		exist->ts_min = event->ts_min;
+	}
+
+	merge_stacks(exist, event);
+	free_event_hash(event);
+}
+
+static void add_group(struct handle_data *h, struct task_data *task)
+{
+	unsigned long long key;
+	struct trace_hash_item *item;
+	struct group_data *grp;
+	struct trace_hash_item **bucket;
+	void *data = task->comm;
+
+	if (!task->comm)
+		return;
+
+	key = trace_hash_str(task->comm);
+
+	item = trace_hash_find(&h->group_hash, key, match_group, data);
+	if (item) {
+		grp = group_from_item(item);
+	} else {
+		grp = malloc_or_die(sizeof(*grp));
+		memset(grp, 0, sizeof(*grp));
+
+		grp->comm = strdup(task->comm);
+		if (!grp->comm)
+			die("strdup");
+		grp->hash.key = key;
+		trace_hash_add(&h->group_hash, &grp->hash);
+		trace_hash_init(&grp->event_hash, 32);
+	}
+	task->group = grp;
+
+	trace_hash_for_each_bucket(bucket, &task->event_hash) {
+		trace_hash_while_item(item, bucket) {
+			struct event_hash *event_hash;
+
+			event_hash = event_from_item(item);
+			trace_hash_del(&event_hash->hash);
+			merge_event_into_group(grp, event_hash);
+		}
+	}
+}
+
+static void merge_tasks(struct handle_data *h)
+{
+	struct trace_hash_item **bucket;
+	struct trace_hash_item *item;
+
+	if (!merge_like_comms)
+		return;
+
+	trace_hash_for_each_bucket(bucket, &h->task_hash) {
+		trace_hash_for_each_item(item, bucket)
+			add_group(h, task_from_item(item));
+	}
+}
+
 int trace_profile(void)
 {
 	struct handle_data *h;
 
 	for (h = handles; h; h = h->next) {
+		if (merge_like_comms)
+			merge_tasks(h);
 		output_handle(h);
 		trace_hash_free(&h->task_hash);
 	}

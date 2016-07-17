@@ -1,7 +1,7 @@
 # trace-cmd version
 TC_VERSION = 2
-TC_PATCHLEVEL = 5
-TC_EXTRAVERSION = 3
+TC_PATCHLEVEL = 6
+TC_EXTRAVERSION =
 
 # Kernel Shark version
 KS_VERSION = 0
@@ -231,12 +231,25 @@ override CFLAGS += -D_GNU_SOURCE
 ifndef NO_PTRACE
 ifneq ($(call try-cc,$(SOURCE_PTRACE),),y)
 	NO_PTRACE = 1
-	CFLAGS += -DWARN_NO_PTRACE
+	override CFLAGS += -DWARN_NO_PTRACE
 endif
 endif
 
 ifdef NO_PTRACE
-CFLAGS += -DNO_PTRACE
+override CFLAGS += -DNO_PTRACE
+endif
+
+ifndef NO_AUDIT
+ifneq ($(call try-cc,$(SOURCE_AUDIT),-laudit),y)
+	NO_AUDIT = 1
+	override CFLAGS += -DWARN_NO_AUDIT
+endif
+endif
+
+ifdef NO_AUDIT
+override CFLAGS += -DNO_AUDIT
+else
+LIBS += -laudit
 endif
 
 # Append required CFLAGS
@@ -334,6 +347,7 @@ PLUGIN_OBJS += plugin_xen.o
 PLUGIN_OBJS += plugin_scsi.o
 PLUGIN_OBJS += plugin_cfg80211.o
 PLUGIN_OBJS += plugin_blk.o
+PLUGIN_OBJS += plugin_tlb.o
 
 PLUGINS := $(PLUGIN_OBJS:.o=.so)
 

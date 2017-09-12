@@ -263,6 +263,11 @@ OPTIONS
     timestamp to gettimeofday which will allow wall time output from the
     timestamps reading the created 'trace.dat' file.
 
+*--max-graph-depth* 'depth'::
+    Set the maximum depth the function_graph tracer will trace into a function.
+    A value of one will only show where userspace enters the kernel but not any
+    functions called in the kernel. The default is zero, which means no limit.
+
 *--profile*::
     With the *--profile* option, "trace-cmd" will enable tracing that can
     be used with trace-cmd-report(1) --profile option. If a tracer *-p* is
@@ -285,6 +290,14 @@ OPTIONS
     Will profile hrtimer_expire_entry and hrtimer_expire_ext times.
 
     See trace-cmd-profile(1) for format.
+
+*--ts-offset offset*::
+    Add an offset for the timestamp in the trace.dat file. This will add a
+    offset option into the trace.dat file such that a trace-cmd report will
+    offset all the timestamps of the events by the given offset. The offset
+    is in raw units. That is, if the event timestamps are in nanoseconds
+    the offset will also be in nanoseconds even if the displayed units are
+    in microseconds.
 
 *--stderr*::
     Have output go to stderr instead of stdout, but the output of the command

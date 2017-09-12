@@ -34,6 +34,7 @@
 #include <errno.h>
 
 #include "trace-cmd.h"
+#include "event-utils.h"
 
 struct tracecmd_recorder {
 	int		fd;
@@ -116,7 +117,7 @@ tracecmd_create_buffer_recorder_fd2(int fd, int fd2, int cpu, unsigned flags,
 	char *path = NULL;
 	int ret;
 
-	recorder = malloc_or_die(sizeof(*recorder));
+	recorder = malloc(sizeof(*recorder));
 	if (!recorder)
 		return NULL;
 
@@ -155,7 +156,7 @@ tracecmd_create_buffer_recorder_fd2(int fd, int fd2, int cpu, unsigned flags,
 	recorder->fd1 = fd;
 	recorder->fd2 = fd2;
 
-	path = malloc_or_die(strlen(buffer) + 40);
+	path = malloc(strlen(buffer) + 40);
 	if (!path)
 		goto out_free;
 
@@ -167,13 +168,13 @@ tracecmd_create_buffer_recorder_fd2(int fd, int fd2, int cpu, unsigned flags,
 	if (recorder->trace_fd < 0)
 		goto out_free;
 
-	free(path);
-
 	if ((recorder->flags & TRACECMD_RECORD_NOSPLICE) == 0) {
 		ret = pipe(recorder->brass);
 		if (ret < 0)
 			goto out_free;
 	}
+
+	free(path);
 
 	return recorder;
 

@@ -1,9 +1,10 @@
-trace-cmd (2.6-0.1+deb9u1) stretch; urgency=medium
+trace-cmd (2.6.1-0.1) unstable; urgency=medium
 
   * Non-maintainer upload.
-  * Fix segfault while processing certain trace files (Closes: #867440).
+  * Update to v2.6.1:
+    Fixs segfault while processing certain trace files (Closes: #867440).
 
- -- Sebastian Andrzej Siewior <sebastian@breakpoint.cc>  Wed, 20 Sep 2017 21:51:23 +0200
+ -- Sebastian Andrzej Siewior <sebastian@breakpoint.cc>  Tue, 12 Sep 2017 21:50:27 +0200
 
 trace-cmd (2.6-0.1) unstable; urgency=medium
 

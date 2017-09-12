@@ -52,6 +52,7 @@ static struct usage_help usage_help[] = {
 		"          --profile enable tracing options needed for report --profile\n"
 		"          --func-stack perform a stack trace for function tracer\n"
 		"             (use with caution)\n"
+		"          --max-graph-depth limit function_graph depth\n"
 	},
 	{
 		"start",
@@ -139,6 +140,8 @@ static struct usage_help usage_help[] = {
 		"          -P show printk list\n"
 		"          -E show event files stored\n"
 		"          -F filter to filter output on\n"
+		"          -I filter out events with the HARDIRQ flag set\n"
+		"          -S filter out events with the SOFTIRQ flag set\n"
 		"          -t print out full timestamp. Do not truncate to 6 places.\n"
 		"          -R raw format: ignore print format and only show field data\n"
 		"          -r raw format the events that match the option\n"
@@ -159,6 +162,13 @@ static struct usage_help usage_help[] = {
 		"          -H Allows users to hook two events together for timings\n"
 		"             (used with --profile)\n"
 		"          --by-comm used with --profile, merge events for related comms\n"
+		"          --ts-offset will add amount to timestamp of all events of the\n"
+		"                     previous data file.\n"
+		"          --ts2secs HZ, pass in the timestamp frequency (per second)\n"
+		"                     to convert the displayed timestamps to seconds\n"
+		"                     Affects the previous data file, unless there was no\n"
+		"                     previous data file, in which case it becomes default\n"
+		"           --ts-diff Show the delta timestamp between events.\n"
 	},
 	{
 		"stream",
@@ -316,4 +326,10 @@ void usage(char **argv)
  out:
 	printf("\n");
 	exit(-1);
+}
+
+
+void trace_usage(int argc, char **argv)
+{
+	usage(argv);
 }

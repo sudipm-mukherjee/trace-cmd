@@ -1,1 +1,2 @@
 0001-trace-cmd-Use-python2.7-for-executable-name.patch
+0002-tools-lib-traceevent-Add-checks-for-returned-EVENT_E.patch

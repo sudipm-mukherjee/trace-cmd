@@ -1,0 +1,19 @@
+#!/usr/bin/make -f
+
+include /usr/share/cdbs/1/rules/buildvars.mk
+
+%:
+	dh $@
+
+OPTS=DESTDIR=$(DEB_DESTDIR) prefix=/usr
+
+override_dh_auto_clean:
+	$(MAKE) clean doc_clean $(OPTS)
+override_dh_auto_build:
+	$(MAKE) all $(OPTS)
+	$(MAKE) gui $(OPTS)
+	$(MAKE) doc $(OPTS)
+override_dh_auto_install:
+	$(MAKE) install $(OPTS)
+	$(MAKE) install_gui $(OPTS)
+	$(MAKE) install_doc $(OPTS)

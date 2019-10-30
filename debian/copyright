@@ -1,0 +1,186 @@
+Format: http://www.debian.org/doc/packaging-manuals/copyright-format/1.0/
+Upstream-Name: trace-cmd
+Upstream-Contact: Steven Rostedt <rostedt@goodmis.org>
+Source: git://git.kernel.org/pub/scm/utils/trace-cmd/trace-cmd.git
+
+Files: *
+Copyright: 2010 Red Hat Inc, Steven Rostedt <srostedt@redhat.com>
+License: GPL-2
+
+Files: lib/trace-cmd/include/trace-hash-local.h
+Copyright: 2009, Steven Rostedt <srostedt@redhat.com>
+License: GPL-2
+
+Files:lib/trace-cmd/trace-hash.c include/trace-cmd/trace-hash.h tracecmd/trace-stream.c tracecmd/trace-stat.c tracecmd/trace-profile.c Documentation/trace-cmd-profile.1.txt Documentation/trace-cmd-stream.1.txt Documentation/trace-cmd-stat.1.txt
+Copyright: 2014 Red Hat Inc, Steven Rostedt <srostedt@redhat.com>
+License: GPL-2
+
+Files: tracecmd/trace-show.c tracecmd/trace-stack.c tracecmd/trace-record.c tracecmd/trace-cmd.c tracecmd/trace-check-events.c tracecmd/trace-listen.c tracecmd/trace-list.c tracecmd/trace-restore.c tracecmd/trace-read.c tracecmd/include/trace-local.h
+Copyright: 2009, 2010 Red Hat Inc, Steven Rostedt <srostedt@redhat.com>
+License: GPL-2
+
+Files: tracecmd/trace-mem.c tracecmd/trace-hist.c tracecmd/trace-snapshot.c Documentation/trace-cmd-mem.1.txt
+Copyright: 2013 Red Hat Inc, Steven Rostedt <srostedt@redhat.com>
+License: GPL-2
+
+Files: kernel-shark/examples/dataplot.cpp kernel-shark/examples/datahisto.c kernel-shark/examples/dataload.c kernel-shark/src/kshark-record.cpp kernel-shark/examples/datafilter.c
+Copyright: 2018 VMware Inc, Yordan Karadzhov <y.karadz@gmail.com>
+License: GPL-2
+
+Files: kernel-shark/examples/widgetdemo.cpp
+Copyright: 2017 VMware Inc, Yordan Karadzhov <ykaradzhov@vmware.com>
+License: GPL-2
+
+Files: kernel-shark/src/kernelshark.cpp
+Copyright: 2017 VMware Inc, Yordan Karadzhov <y.karadz@gmail.com>
+License: GPL-2
+
+Files: Documentation/trace-cmd-check-events.1.txt
+Copyright: 2011 Google, Inc.
+License: GPL-2
+
+Files: Documentation/trace-cmd-options.1.txt
+Copyright: 2011 Red Hat, Inc.
+License: GPL-2
+
+Files: lib/trace-cmd/trace-filter-hash.c
+Copyright: 2009, Steven Rostedt <srostedt@redhat.com>
+           2018 VMware Inc, Steven Rostedt <rostedt@goodmis.org>
+License: LGPL-2.1
+
+Files: plugins/plugin_hrtimer.c
+Copyright: 2009 Red Hat Inc, Steven Rostedt <srostedt@redhat.com>
+           2009 Johannes Berg <johannes@sipsolutions.net>
+License: LGPL-2.1
+
+Files: kernel-shark/src/libkshark-plugin.h
+Copyright: 2016 Red Hat Inc, Steven Rostedt <srostedt@redhat.com>
+License: LGPL-2.1
+
+Files: include/traceevent/kbuffer.h
+Copyright: 2012 Red Hat Inc, Steven Rostedt <srostedt@redhat.com>
+License: LGPL-2.1
+
+Files: include/trace-cmd/trace-cmd.h
+Copyright: 2008, 2009, 2010 Red Hat Inc, Steven Rostedt <srostedt@redhat.com>
+License: LGPL-2.1
+
+Files: include/trace-cmd/trace-filter-hash.h
+Copyright: 2009, 2010 Red Hat Inc, Steven Rostedt <srostedt@redhat.com>
+           2018 VMware Inc, Steven Rostedt <rostedt@goodmis.org>
+License: LGPL-2.1
+
+Files: lib/traceevent/tep_strerror.c
+Copyright: 2018 VMware Inc, Steven Rostedt <rostedt@goodmis.org>
+License: LGPL-2.1
+
+Files: lib/trace-cmd/trace-hooks.c plugins/plugin_tlb.c
+Copyright: 2015 Red Hat Inc, Steven Rostedt <srostedt@redhat.com>
+License: LGPL-2.1
+
+Files: plugins/plugin_futex.c
+Copyright: 2017 National Instruments Corp.
+License: LGPL-2.1
+
+Files: plugins/plugin_jbd2.c lib/traceevent/include/event-utils.h lib/traceevent/parse-filter.c lib/traceevent/parse-utils.c tracecmd/include/trace-cmd-local.h
+Copyright: 2010 Red Hat Inc, Steven Rostedt <srostedt@redhat.com>
+License: LGPL-2.1
+
+Files: plugins/plugin_mac80211.c
+Copyright: 2009 Johannes Berg <johannes@sipsolutions.net>
+License: LGPL-2.1
+
+Files: lib/trace-cmd/trace-blk-hack.c lib/traceevent/trace-seq.c tracecmd/include/list.h plugins/plugin_kvm.c plugins/plugin_blk.c plugins/plugin_kmem.c 
+Copyright: 2009 Red Hat Inc, Steven Rostedt <srostedt@redhat.com>
+License: LGPL-2.1
+
+Files: tracecmd/trace-msg.c
+Copyright: 2013 Hitachi, Ltd. Yoshihiro YUNOMAE <yoshihiro.yunomae.ez@hitachi.com>
+License: LGPL-2.1
+
+Files: lib/trace-cmd/trace-input.c lib/trace-cmd/trace-ftrace.c lib/trace-cmd/trace-util.c lib/trace-cmd/trace-recorder.c lib/traceevent/event-plugin.c lib/traceevent/kbuffer-parse.c lib/traceevent/event-parse-api.c plugins/plugin_function.c plugins/plugin_sched_switch.c tracecmd/trace-output.c include/traceevent/event-parse.h include/traceevent/trace-seq.h lib/traceevent/event-parse-local.h lib/traceevent/event-parse.c
+Copyright: 2009, 2010 Red Hat Inc, Steven Rostedt <srostedt@redhat.com>
+License: LGPL-2.1
+
+Files: kernel-shark/*
+Copyright: 2017 VMware Inc, Yordan Karadzhov <ykaradzhov@vmware.com>
+License: LGPL-2.1
+
+Files: kernel-shark/src/libkshark-model.c kernel-shark/src/plugins/sched_events.h kernel-shark/src/KsPlotTools.cpp kernel-shark/src/KsPlotTools.hpp kernel-shark/src/libkshark-model.h kernel-shark/src/libkshark.c kernel-shark/src/libkshark.h kernel-shark/src/libkshark-plugin.c
+Copyright: 2017 VMware Inc, Yordan Karadzhov <y.karadz@gmail.com>
+License: LGPL-2.1
+
+Files: kernel-shark/src/plugins/SchedEvents.cpp kernel-shark/src/plugins/sched_events.c kernel-shark/src/libkshark-plot.c kernel-shark/src/libkshark-plot.h kernel-shark/src/libkshark-collection.c kernel-shark/src/KsPlugins.hpp kernel-shark/src/libkshark-configio.c
+Copyright: 2018 VMware Inc, Yordan Karadzhov <y.karadz@gmail.com>
+License: LGPL-2.1
+
+Files: kernel-shark/src/plugins/missed_events.c kernel-shark/src/plugins/MissedEvents.cpp kernel-shark/src/KsQuickContextMenu.cpp kernel-shark/src/KsSearchFSM.hpp kernel-shark/src/KsSearchFSM.cpp kernel-shark/src/KsQuickContextMenu.hpp
+Copyright: 2018 VMware Inc, Yordan Karadzhov <ykaradzhov@vmware.com>
+License: LGPL-2.1
+
+Files: kernel-shark/src/plugins/missed_events.h
+Copyright: 2018 VMware Inc, Yordan Karadzhov <ykaradzov@vmware.com>
+License: LGPL-2.1
+
+Files: debian/*
+Copyright: 2019 Sudip Mukherjee <sudipm.mukherjee@gmail.com>
+License: GPL-2.0+
+
+License: GPL-2
+ This program is free software; you can redistribute it
+ and/or modify it under the terms of the GNU General Public
+ License version 2 as published by the Free Software
+ Foundation.
+ .
+ This program is distributed in the hope that it will be
+ useful, but WITHOUT ANY WARRANTY; without even the implied
+ warranty of MERCHANTABILITY or FITNESS FOR A PARTICULAR
+ PURPOSE.  See the GNU General Public License for more
+ details.
+ .
+ You should have received a copy of the GNU General Public
+ License along with this package; if not, write to the Free
+ Software Foundation, Inc., 51 Franklin St, Fifth Floor,
+ Boston, MA 02110-1301 USA
+ .
+ On Debian systems, the full text of the GNU General Public
+ License version 2 can be found in the file
+ `/usr/share/common-licenses/GPL-2'.
+
+License: LGPL-2.1
+ This library is free software; you can redistribute it
+ and/or modify it under the terms of the GNU Lesser General
+ Public License version 2.1 as published by the Free
+ Software Foundation.
+ .
+ This program is distributed in the hope that it will be
+ useful, but WITHOUT ANY WARRANTY; without even the implied
+ warranty of MERCHANTABILITY or FITNESS FOR A PARTICULAR
+ PURPOSE.  See the GNU Lesser General Public License for
+ more details.
+ .
+ You should have received a copy of the GNU Lesser General
+ Public License along with this package; if not, write to
+ the Free Software Foundation, Inc., 51 Franklin St, Fifth
+ Floor, Boston, MA 02110-1301 USA
+ .
+ On Debian systems, the full text of the GNU Lesser General
+ Public License version 2.1 can be found in the file
+ `/usr/share/common-licenses/LGPL-2.1'.
+
+License: GPL-2.0+
+ This package is free software; you can redistribute it and/or modify
+ it under the terms of the GNU General Public License as published by
+ the Free Software Foundation; either version 2 of the License, or
+ (at your option) any later version.
+ .
+ This package is distributed in the hope that it will be useful,
+ but WITHOUT ANY WARRANTY; without even the implied warranty of
+ MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ GNU General Public License for more details.
+ .
+ You should have received a copy of the GNU General Public License
+ along with this program. If not, see <https://www.gnu.org/licenses/>
+ .
+ On Debian systems, the complete text of the GNU General
+ Public License version 2 can be found in "/usr/share/common-licenses/GPL-2".

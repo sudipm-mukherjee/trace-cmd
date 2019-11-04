@@ -1,5 +1,6 @@
-usr/bin/kernelshark
-usr/bin/trace-graph
-usr/bin/trace-view
-usr/share/man/man1/kernelshark.1
+usr/bin/k*
+usr/share/polkit-1
+usr/share/icons
+usr/share/applications
+usr/lib/kernelshark
 usr/share/kernelshark

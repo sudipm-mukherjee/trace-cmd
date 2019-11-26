@@ -865,6 +865,12 @@ static void report_traceon(struct buffer_instance *instance)
 
 static void stat_instance(struct buffer_instance *instance)
 {
+	if (instance != &top_instance) {
+		if (instance != first_instance)
+			printf("---------------\n");
+		printf("Instance: %s\n", instance->name);
+	}
+
 	report_plugin(instance);
 	report_events(instance);
 	report_event_filters(instance);
@@ -905,12 +911,13 @@ void trace_stat (int argc, char **argv)
 			/* Force to use top instance */
 			topt = 1;
 			instance = &top_instance;
-			first_instance = instance;
 			break;
 		default:
 			usage(argv);
 		}
 	}
+
+	update_first_instance(instance, topt);
 
 	for_all_instances(instance) {
 		stat_instance(instance);

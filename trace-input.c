@@ -122,6 +122,11 @@ void tracecmd_clear_flag(struct tracecmd_input *handle, int flag)
 	handle->flags &= ~flag;
 }
 
+unsigned long tracecmd_get_flags(struct tracecmd_input *handle)
+{
+	return handle->flags;
+}
+
 #if DEBUG_RECORD
 static void remove_record(struct page *page, struct pevent_record *record)
 {
@@ -1996,7 +2001,7 @@ static int handle_options(struct tracecmd_input *handle)
 			break;
 		case TRACECMD_OPTION_HOOK:
 			hook = tracecmd_create_event_hook(buf);
-			hook = handle->hooks;
+			hook->next = handle->hooks;
 			handle->hooks = hook;
 			break;
 		default:
@@ -2036,8 +2041,10 @@ static int read_cpu_data(struct tracecmd_input *handle)
 	/*
 	 * Check if this is a latency report or not.
 	 */
-	if (strncmp(buf, "latency", 7) == 0)
+	if (strncmp(buf, "latency", 7) == 0) {
+		handle->flags |= TRACECMD_FL_LATENCY;
 		return 1;
+	}
 
 	/* We expect this to be flyrecord */
 	if (strncmp(buf, "flyrecord", 9) != 0)
@@ -2385,7 +2392,7 @@ struct tracecmd_input *tracecmd_alloc_fd(int fd)
 	version = read_string(handle);
 	if (!version)
 		goto failed_read;
-	printf("version = %s\n", version);
+	pr_stat("version = %s\n", version);
 	free(version);
 
 	if (do_read_check(handle, buf, 1))
@@ -2457,6 +2464,7 @@ struct tracecmd_input *tracecmd_alloc(const char *file)
 struct tracecmd_input *tracecmd_open_fd(int fd)
 {
 	struct tracecmd_input *handle;
+	int ret;
 
 	handle = tracecmd_alloc_fd(fd);
 	if (!handle)
@@ -2465,7 +2473,7 @@ struct tracecmd_input *tracecmd_open_fd(int fd)
 	if (tracecmd_read_headers(handle) < 0)
 		goto fail;
 
-	if (tracecmd_init_data(handle) < 0)
+	if ((ret = tracecmd_init_data(handle)) < 0)
 		goto fail;
 
 	return handle;
@@ -2810,6 +2818,61 @@ int tracecmd_record_at_buffer_start(struct tracecmd_input *handle,
 
 	offset = record->offset - page->offset;
 	return offset == kbuffer_start_of_data(kbuf);
+}
+
+unsigned long long tracecmd_page_ts(struct tracecmd_input *handle,
+				    struct pevent_record *record)
+{
+	struct page *page = record->priv;
+	struct kbuffer *kbuf = handle->cpu_data[record->cpu].kbuf;
+
+	if (!page || !kbuf)
+		return 0;
+
+	return kbuffer_subbuf_timestamp(kbuf, page->map);
+}
+
+unsigned int tracecmd_record_ts_delta(struct tracecmd_input *handle,
+				      struct pevent_record *record)
+{
+	struct kbuffer *kbuf = handle->cpu_data[record->cpu].kbuf;
+	struct page *page = record->priv;
+	int offset;
+
+	if (!page || !kbuf)
+		return 0;
+
+	offset = record->offset - page->offset;
+
+	return kbuffer_ptr_delta(kbuf, page->map + offset);
+}
+
+struct kbuffer *tracecmd_record_kbuf(struct tracecmd_input *handle,
+				     struct pevent_record *record)
+{
+	return handle->cpu_data[record->cpu].kbuf;
+}
+
+void *tracecmd_record_page(struct tracecmd_input *handle,
+			   struct pevent_record *record)
+{
+	struct page *page = record->priv;
+
+	return page ? page->map : NULL;
+}
+
+void *tracecmd_record_offset(struct tracecmd_input *handle,
+			     struct pevent_record *record)
+{
+	struct page *page = record->priv;
+	int offset;
+
+	if (!page)
+		return NULL;
+
+	offset = record->offset - page->offset;
+
+	return page->map + offset;
 }
 
 int tracecmd_buffer_instances(struct tracecmd_input *handle)

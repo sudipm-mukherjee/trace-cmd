@@ -48,6 +48,7 @@ static struct usage_help usage_help[] = {
 		"          -B create sub buffer and folling events will be enabled here\n"
 		"          -k do not reset the buffers after tracing.\n"
 		"          -i do not fail if an event is not found\n"
+		"          --by-comm used with --profile, merge events for related comms\n"
 		"          --profile enable tracing options needed for report --profile\n"
 		"          --func-stack perform a stack trace for function tracer\n"
 		"             (use with caution)\n"
@@ -62,27 +63,32 @@ static struct usage_help usage_help[] = {
 	{
 		"extract",
 		"extract a trace from the kernel",
-		" %s extract [-p plugin][-O option][-o file][-s]\n"
-		"          Uses same options as record, but only reads an existing trace.\n"
+		" %s extract [-p plugin][-O option][-o file][-B buf][-s][-a][-t]\n"
+		"          Uses similar options as record, but only reads an existing trace.\n"
 		"          -s : extract the snapshot instead of the main buffer\n"
+		"          -B : extract a given buffer (more than one may be specified)\n"
+		"          -a : extract all buffers (except top one)\n"
+		"          -t : extract the top level buffer (useful with -B and -a)\n"
 	},
 	{
 		"stop",
 		"stop the kernel from recording trace data",
-		" %s stop [-B buf [-B buf]..] [-t]\n"
+		" %s stop [-B buf [-B buf]..] [-a] [-t]\n"
 		"          Stops the tracer from recording more data.\n"
 		"          Used in conjunction with start\n"
-		"          -B stop a given buffer (more than one may be specified)\n "
-		"          -t stop the top level buffer (needed if -B is specified)\n"
+		"          -B stop a given buffer (more than one may be specified)\n"
+		"          -a stop all buffers (except top one)\n"
+		"          -t stop the top level buffer (useful with -B or -a)\n"
 	},
 	{
 		"restart",
 		"restart the kernel trace data recording",
-		" %s restart [-B buf [-B buf]..] [-t]\n"
+		" %s restart [-B buf [-B buf]..] [-a] [-t]\n"
 		"          Restarts recording after a trace-cmd stop.\n"
 		"          Used in conjunction with stop\n"
-		"          -B restart a given buffer (more than one may be specified)\n "
-		"          -t restart the top level buffer (needed if -B is specified)\n"
+		"          -B restart a given buffer (more than one may be specified)\n"
+		"          -a restart all buffers (except top one)\n"
+		"          -t restart the top level buffer (useful with -B or -a)\n"
 	},
 	{
 		"show",
@@ -111,13 +117,14 @@ static struct usage_help usage_help[] = {
 	{
 		"reset",
 		"disable all kernel tracing and clear the trace buffers",
-		" %s reset [-b size][-B buf][-d][-t]\n"
+		" %s reset [-b size][-B buf][-a][-d][-t]\n"
 		"          Disables the tracer (may reset trace file)\n"
 		"          Used in conjunction with start\n"
 		"          -b change the kernel buffer size (in kilobytes per CPU)\n"
-		"          -B reset the given buffer instance (top instance ignored)\n"
 		"          -d delete the previous specified instance\n"
-		"          -t still reset the top instance if -B option is given\n"
+		"          -B reset the given buffer instance (may specify multiple -B)\n"
+		"          -a reset all instances (except top one)\n"
+		"          -t reset the top level instance (useful with -B or -a)\n"
 	},
 	{
 		"report",
@@ -125,6 +132,7 @@ static struct usage_help usage_help[] = {
 		" %s report [-i file] [--cpu cpu] [-e][-f][-l][-P][-L][-N][-R][-E]\\\n"
 		"           [-r events][-n events][-F filter][-v][-V][-T][-O option]\n"
 		"           [-H [start_system:]start_event,start_match[,pid]/[end_system:]end_event,end_match[,flags]\n"
+		"           [-G]\n"
 		"          -i input file [default trace.dat]\n"
 		"          -e show file endianess\n"
 		"          -f show function list\n"
@@ -147,9 +155,10 @@ static struct usage_help usage_help[] = {
 		"          --stat - show the buffer stats that were reported at the end of the record.\n"
 		"          --uname - show uname of the record, if it was saved\n"
 		"          --profile report stats on where tasks are blocked and such\n"
+		"          -G when profiling, set soft and hard irqs as global\n"
 		"          -H Allows users to hook two events together for timings\n"
 		"             (used with --profile)\n"
-
+		"          --by-comm used with --profile, merge events for related comms\n"
 	},
 	{
 		"stream",
@@ -160,7 +169,7 @@ static struct usage_help usage_help[] = {
 	{
 		"profile",
 		"Start profiling and read the output directly",
-		" %s profile [-e event][-p plugin][-d][-O option ][-P pid][-S][-o output]\n"
+		" %s profile [-e event][-p plugin][-d][-O option ][-P pid][-G][-S][-o output]\n"
 		"    [-H [start_system:]start_event,start_match[,pid]/[end_system:]end_event,end_match[,flags]\n\n"
 		"          Uses same options as record --profile.\n"
 		"          -H Allows users to hook two events together for timings\n"

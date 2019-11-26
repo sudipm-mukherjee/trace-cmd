@@ -87,6 +87,8 @@ enum {
 	TRACECMD_OPTION_CPUSTAT,
 	TRACECMD_OPTION_BUFFER,
 	TRACECMD_OPTION_TRACECLOCK,
+	TRACECMD_OPTION_UNAME,
+	TRACECMD_OPTION_HOOK,
 };
 
 enum {
@@ -124,9 +126,12 @@ int tracecmd_is_buffer_instance(struct tracecmd_input *handle);
 
 void tracecmd_print_events(struct tracecmd_input *handle, const char *regex);
 
+struct hook_list *tracecmd_hooks(struct tracecmd_input *handle);
+
 int tracecmd_init_data(struct tracecmd_input *handle);
 
 void tracecmd_print_stats(struct tracecmd_input *handle);
+void tracecmd_print_uname(struct tracecmd_input *handle);
 
 struct pevent_record *
 tracecmd_read_page_record(struct pevent *pevent, void *page, int size,
@@ -218,11 +223,13 @@ struct tracecmd_output *tracecmd_create_init_file_override(const char *output_fi
 							   const char *tracing_dir,
 							   const char *kallsyms);
 struct tracecmd_option *tracecmd_add_option(struct tracecmd_output *handle,
-					    unsigned short id, int size, void *data);
+					    unsigned short id, int size,
+					    const void *data);
 struct tracecmd_option *tracecmd_add_buffer_option(struct tracecmd_output *handle,
 						   const char *name);
 int tracecmd_update_option(struct tracecmd_output *handle,
-			   struct tracecmd_option *option, int size, void *data);
+			   struct tracecmd_option *option, int size,
+			   const void *data);
 void tracecmd_output_close(struct tracecmd_output *handle);
 void tracecmd_output_free(struct tracecmd_output *handle);
 struct tracecmd_output *tracecmd_copy(struct tracecmd_input *ihandle,
@@ -282,6 +289,28 @@ const char *trace_util_plugin_option_value(const char *name);
 
 /* Used for trace-cmd list */
 void tracecmd_ftrace_load_options(void);
+
+/* event hooks */
+
+struct hook_list {
+	struct hook_list	*next;
+	struct buffer_instance	*instance;
+	const char		*hook;
+	char			*str;
+	char			*start_system;
+	char			*start_event;
+	char			*start_match;
+	char			*end_system;
+	char			*end_event;
+	char			*end_match;
+	char			*pid;
+	int			migrate;
+	int			global;
+	int			stack;
+};
+
+struct hook_list *tracecmd_create_event_hook(const char *arg);
+void tracecmd_free_hooks(struct hook_list *hooks);
 
 /* --- Hack! --- */
 int tracecmd_blk_hack(struct tracecmd_input *handle);

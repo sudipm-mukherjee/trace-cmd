@@ -123,6 +123,9 @@ struct wakeup_info {
 	int			pid;
 };
 
+static struct hook_list *hooks;
+static struct hook_list *last_hook;
+
 #define WAKEUP_HASH_SIZE 1024
 static struct trace_hash wakeup_hash;
 
@@ -998,7 +1001,13 @@ static void free_filters(struct filter *event_filter)
 	}
 }
 
-static void read_data_info(struct list_head *handle_list, int stat_only)
+enum output_type {
+	OUTPUT_NORMAL,
+	OUTPUT_STAT_ONLY,
+	OUTPUT_UNAME_ONLY,
+};
+
+static void read_data_info(struct list_head *handle_list, enum output_type otype)
 {
 	struct handle_list *handles;
 	struct handle_list *last_handle;
@@ -1032,11 +1041,17 @@ static void read_data_info(struct list_head *handle_list, int stat_only)
 			return;
 		}
 
-		if (stat_only) {
+		switch (otype) {
+		case OUTPUT_NORMAL:
+			break;
+		case OUTPUT_STAT_ONLY:
 			printf("\nKernel buffer statistics:\n"
 			       "  Note: \"entries\" are the entries left in the kernel ring buffer and are not\n"
 			       "        recorded in the trace data. They should all be zero.\n\n");
 			tracecmd_print_stats(handles->handle);
+			continue;
+		case OUTPUT_UNAME_ONLY:
+			tracecmd_print_uname(handles->handle);
 			continue;
 		}
 
@@ -1047,7 +1062,9 @@ static void read_data_info(struct list_head *handle_list, int stat_only)
 			stacktrace_id = event->id;
 
 		init_wakeup(handles->handle);
-		trace_init_profile(handles->handle);
+		if (last_hook)
+			last_hook->next = tracecmd_hooks(handles->handle);
+		trace_init_profile(handles->handle, hooks);
 
 		process_filters(handles);
 
@@ -1072,7 +1089,7 @@ static void read_data_info(struct list_head *handle_list, int stat_only)
 		}
 	}
 
-	if (stat_only)
+	if (otype != OUTPUT_NORMAL)
 		return;
 
 	do {
@@ -1241,7 +1258,20 @@ static void set_event_flags(struct pevent *pevent, struct event_str *list,
 	}
 }
 
+static void add_hook(const char *arg)
+{
+	struct hook_list *hook;
+
+	hook = tracecmd_create_event_hook(arg);
+
+	hook->next = hooks;
+	hooks = hook;
+	if (!last_hook)
+		last_hook = hook;
+}
+
 enum {
+	OPT_uname	= 244,
 	OPT_profile	= 245,
 	OPT_event	= 246,
 	OPT_comm	= 247,
@@ -1267,11 +1297,13 @@ void trace_report (int argc, char **argv)
 	const char *print_event = NULL;
 	struct input_files *inputs;
 	struct handle_list *handles;
+	enum output_type otype;
 	int show_stat = 0;
 	int show_funcs = 0;
 	int show_endian = 0;
 	int show_page_size = 0;
 	int show_printk = 0;
+	int show_uname = 0;
 	int latency_format = 0;
 	int show_events = 0;
 	int print_events = 0;
@@ -1311,11 +1343,12 @@ void trace_report (int argc, char **argv)
 			{"stat", no_argument, NULL, OPT_stat},
 			{"boundary", no_argument, NULL, OPT_boundary},
 			{"profile", no_argument, NULL, OPT_profile},
+			{"uname", no_argument, NULL, OPT_uname},
 			{"help", no_argument, NULL, '?'},
 			{NULL, 0, NULL, 0}
 		};
 
-		c = getopt_long (argc-1, argv+1, "+hi:fepRr:tPNn:LlEwF:VvTqO:",
+		c = getopt_long (argc-1, argv+1, "+hi:H:fepRr:tPNn:LlEwF:VvTqO:",
 			long_options, &option_index);
 		if (c == -1)
 			break;
@@ -1334,6 +1367,9 @@ void trace_report (int argc, char **argv)
 			break;
 		case 'F':
 			add_filter(optarg, neg);
+			break;
+		case 'H':
+			add_hook(optarg);
 			break;
 		case 'T':
 			test_filters = 1;
@@ -1430,6 +1466,9 @@ void trace_report (int argc, char **argv)
 			break;
 		case OPT_profile:
 			profile = 1;
+			break;
+		case OPT_uname:
+			show_uname = 1;
 			break;
 		default:
 			usage(argv);
@@ -1543,7 +1582,14 @@ void trace_report (int argc, char **argv)
 	if (latency_format)
 		pevent_set_latency_format(pevent, latency_format);
 
-	read_data_info(&handle_list, show_stat);
+	otype = OUTPUT_NORMAL;
+
+	if (show_stat)
+		otype = OUTPUT_STAT_ONLY;
+	/* yeah yeah, uname overrides stat */
+	if (show_uname)
+		otype = OUTPUT_UNAME_ONLY;
+	read_data_info(&handle_list, otype);
 
 	list_for_each_entry(handles, &handle_list, list) {
 		tracecmd_close(handles->handle);

@@ -87,6 +87,8 @@ static const char *input_file;
 static int multi_inputs;
 static int max_file_size;
 
+static int instances;
+
 static int *filter_cpus;
 static int nr_filter_cpus;
 
@@ -95,14 +97,20 @@ static int wakeup_id;
 static int wakeup_new_id;
 static int sched_id;
 
+static int buffer_breaks = 0;
+
 static struct format_field *wakeup_task;
 static struct format_field *wakeup_success;
 static struct format_field *wakeup_new_task;
 static struct format_field *wakeup_new_success;
 static struct format_field *sched_task;
+static struct format_field *sched_prio;
 
 static unsigned long long total_wakeup_lat;
 static unsigned long wakeup_lat_count;
+
+static unsigned long long total_wakeup_rt_lat;
+static unsigned long wakeup_rt_lat_count;
 
 struct wakeup_info {
 	struct wakeup_info	*next;
@@ -278,14 +286,15 @@ static void add_handle(struct tracecmd_input *handle, const char *file)
 	item = malloc_or_die(sizeof(*item));
 	memset(item, 0, sizeof(*item));
 	item->handle = handle;
-	item->file = file + strlen(file);
-	/* we want just the base name */
-	while (*item->file != '/' && item->file >= file)
-		item->file--;
-	item->file++;
-	if (strlen(item->file) > max_file_size)
-		max_file_size = strlen(item->file);
-
+	if (file) {
+		item->file = file + strlen(file);
+		/* we want just the base name */
+		while (*item->file != '/' && item->file >= file)
+			item->file--;
+		item->file++;
+		if (strlen(item->file) > max_file_size)
+			max_file_size = strlen(item->file);
+	}
 	list_add_tail(&item->list, &handle_list);
 }
 
@@ -349,25 +358,33 @@ static void add_pid_filter(const char *arg)
 	}
 }
 
-static char *append_pid_filter(char *curr_filter, const char *events,
-			       const char *field, char *pid)
+static char *append_pid_filter(char *curr_filter, char *pid)
 {
 	char *filter;
 	int len;
 
-	len = strlen("(!=)&&") + strlen(field) + strlen(pid);
-	if (!curr_filter) {
-		/* No need for +1 as we don't use the "||" */
-		filter = malloc_or_die(len);
-		sprintf(filter, "%s:(%s==%s)", events, field, pid);
-	} else {
-		int indx = strlen(curr_filter);
+#define FILTER_FMT "(common_pid==" __STR ")||(pid==" __STR ")||(next_pid==" __STR ")"
 
-		len += indx;
-		filter = realloc(curr_filter, len + indx + 1);
+#undef __STR
+#define __STR ""
+
+	/* strlen(".*:") > strlen("||") */
+	len = strlen(".*:" FILTER_FMT) + strlen(pid) * 3 + 1;
+
+#undef __STR
+#define __STR "%s"
+
+	if (!curr_filter) {
+		filter = malloc_or_die(len);
+		sprintf(filter, ".*:" FILTER_FMT, pid, pid, pid);
+	} else {
+
+		len += strlen(curr_filter);
+
+		filter = realloc(curr_filter, len);
 		if (!filter)
 			die("realloc");
-		sprintf(filter, "%s||(%s==%s)", curr_filter, field, pid);
+		sprintf(filter, "%s||" FILTER_FMT, curr_filter, pid, pid, pid);
 	}
 
 	return filter;
@@ -376,27 +393,17 @@ static char *append_pid_filter(char *curr_filter, const char *events,
 static void make_pid_filter(void)
 {
 	struct pid_list *list;
-	char *common_str = NULL;
-	char *sched_switch_str = NULL;
-	char *sched_wakeup_str = NULL;
+	char *str = NULL;
 
 	if (!pid_list)
 		return;
 
 	/* First do all common pids */
 	for (list = pid_list; list; list = list->next) {
-		common_str = append_pid_filter(common_str, ".*",
-					       "common_pid", list->pid);
-		sched_switch_str = append_pid_filter(sched_switch_str, "sched_switch",
-						     "next_pid", list->pid);
-		sched_wakeup_str = append_pid_filter(sched_wakeup_str, "sched_wakeup.*",
-						     "pid", list->pid);
+		str = append_pid_filter(str, list->pid);
 	}
 
-	/* Add it as a negative filters */
-	add_filter(common_str, 1);
-	add_filter(sched_switch_str, 1);
-	add_filter(sched_wakeup_str, 1);
+	add_filter(str, 0);
 
 	while (pid_list) {
 		list = pid_list;
@@ -484,6 +491,10 @@ static void init_wakeup(struct tracecmd_input *handle)
 	if (!sched_task)
 		goto fail;
 
+	sched_prio = pevent_find_field(event, "next_prio");
+	if (!sched_prio)
+		goto fail;
+
 
 	wakeup_new_id = -1;
 
@@ -546,7 +557,12 @@ static unsigned long long max_time;
 static unsigned long long min_lat = -1;
 static unsigned long long min_time;
 
-static void add_sched(unsigned int val, unsigned long long end)
+static unsigned long long max_rt_lat = 0;
+static unsigned long long max_rt_time;
+static unsigned long long min_rt_lat = -1;
+static unsigned long long min_rt_time;
+
+static void add_sched(unsigned int val, unsigned long long end, int rt)
 {
 	unsigned int key = calc_wakeup_key(val);
 	struct wakeup_info *info;
@@ -568,10 +584,26 @@ static void add_sched(unsigned int val, unsigned long long end)
 		min_time = end;
 	}
 
+	if (rt) {
+		if (cal > max_rt_lat) {
+			max_rt_lat = cal;
+			max_rt_time = end;
+		}
+		if (cal < min_rt_lat) {
+			min_rt_lat = cal;
+			min_rt_time = end;
+		}
+	}
+
 	printf(" Latency: %llu.%03llu usecs", cal / 1000, cal % 1000);
 
 	total_wakeup_lat += cal;
 	wakeup_lat_count++;
+
+	if (rt) {
+		total_wakeup_rt_lat += cal;
+		wakeup_rt_lat_count++;
+	}
 
 	next = &wakeup_hash[key];
 	while (*next) {
@@ -610,10 +642,34 @@ static void process_wakeup(struct pevent *pevent, struct pevent_record *record)
 			return;
 		add_wakeup(val, record->ts);
 	} else if (id == sched_id) {
+		int rt = 1;
+		if (pevent_read_number_field(sched_prio, record->data, &val))
+			return;
+		if (val > 99)
+			rt = 0;
 		if (pevent_read_number_field(sched_task, record->data, &val))
 			return;
-		add_sched(val, record->ts);
+		add_sched(val, record->ts, rt);
 	}
+}
+
+static void
+show_wakeup_timings(unsigned long long total, unsigned long count,
+		    unsigned long long lat_max, unsigned long long time_max,
+		    unsigned long long lat_min, unsigned long long time_min)
+{
+
+	total /= count;
+
+	printf("\nAverage wakeup latency: %llu.%03llu usecs\n",
+	       total / 1000,
+	       total % 1000);
+	printf("Maximum Latency: %llu.%03llu usecs at ", lat_max / 1000, lat_max % 1000);
+	printf("timestamp: %llu.%06llu\n",
+	       time_max / 1000000000, ((time_max + 500) % 1000000000) / 1000);
+	printf("Minimum Latency: %llu.%03llu usecs at ", lat_min / 1000, lat_min % 1000);
+	printf("timestamp: %llu.%06llu\n\n", time_min / 1000000000,
+	       ((time_min + 500) % 1000000000) / 1000);
 }
 
 static void finish_wakeup(void)
@@ -624,17 +680,17 @@ static void finish_wakeup(void)
 	if (!show_wakeup || !wakeup_lat_count)
 		return;
 
-	total_wakeup_lat /= wakeup_lat_count;
+	show_wakeup_timings(total_wakeup_lat, wakeup_lat_count,
+			    max_lat, max_time,
+			    min_lat, min_time);
 
-	printf("\nAverage wakeup latency: %llu.%03llu usecs\n",
-	       total_wakeup_lat / 1000,
-	       total_wakeup_lat % 1000);
-	printf("Maximum Latency: %llu.%03llu usecs at ", max_lat / 1000, max_lat % 1000);
-	printf("timestamp: %llu.%06llu\n",
-	       max_time / 1000000000, ((max_time + 500) % 1000000000) / 1000);
-	printf("Minimum Latency: %llu.%03llu usecs at ", min_lat / 1000, min_lat % 1000);
-	printf("timestamp: %llu.%06llu\n\n", min_time / 1000000000,
-	       ((min_time + 500) % 1000000000) / 1000);
+
+	if (wakeup_rt_lat_count) {
+		printf("RT task timings:\n");
+		show_wakeup_timings(total_wakeup_rt_lat, wakeup_rt_lat_count,
+				    max_rt_lat, max_rt_time,
+				    min_rt_lat, min_rt_time);
+	}
 
 	for (i = 0; i < WAKEUP_HASH_SIZE; i++) {
 		while (wakeup_hash[i]) {
@@ -650,6 +706,7 @@ static void show_data(struct tracecmd_input *handle,
 {
 	struct pevent *pevent;
 	struct trace_seq s;
+	bool use_trace_clock;
 
 	if (filter_record(handle, record))
 		return;
@@ -665,7 +722,12 @@ static void show_data(struct tracecmd_input *handle,
 	else if (record->missed_events < 0)
 		trace_seq_printf(&s, "CPU:%d [EVENTS DROPPED]\n",
 				 record->cpu);
-	pevent_print_event(pevent, &s, record);
+	if (buffer_breaks && tracecmd_record_at_buffer_start(handle, record))
+		trace_seq_printf(&s, "CPU:%d [SUBBUFFER START]\n",
+				 record->cpu);
+
+	use_trace_clock = tracecmd_get_use_trace_clock(handle);
+	pevent_print_event(pevent, &s, record, use_trace_clock);
 	if (s.len && *(s.buffer + s.len - 1) == '\n')
 		s.len--;
 	trace_seq_do_printf(&s);
@@ -791,9 +853,12 @@ static void free_handle_record(struct handle_list *handles)
 static void print_handle_file(struct handle_list *handles)
 {
 	/* Only print file names if more than one file is read */
-	if (!multi_inputs)
+	if (!multi_inputs && !instances)
 		return;
-	printf("%*s: ", max_file_size, handles->file);
+	if (handles->file)
+		printf("%*s: ", max_file_size, handles->file);
+	else
+		printf("%*s  ", max_file_size, "");
 }
 
 static void free_filters(struct filter *event_filter)
@@ -822,6 +887,10 @@ static void read_data_info(struct list_head *handle_list, int stat_only)
 
 	list_for_each_entry(handles, handle_list, list) {
 
+		/* Don't process instances that we added here */
+		if (tracecmd_is_buffer_instance(handles->handle))
+			continue;
+
 		ret = tracecmd_init_data(handles->handle);
 		if (ret < 0)
 			die("failed to init data");
@@ -849,6 +918,26 @@ static void read_data_info(struct list_head *handle_list, int stat_only)
 
 		init_wakeup(handles->handle);
 		process_filters(handles);
+
+		/* If this file has buffer instances, get the handles for them */
+		instances = tracecmd_buffer_instances(handles->handle);
+		if (instances) {
+			struct tracecmd_input *new_handle;
+			const char *name;
+			int i;
+
+			for (i = 0; i < instances; i++) {
+				name = tracecmd_buffer_instance_name(handles->handle, i);
+				if (!name)
+					die("error in reading buffer instance");
+				new_handle = tracecmd_buffer_instance_handle(handles->handle, i);
+				if (!new_handle) {
+					warning("could not retreive handle %s", name);
+					continue;
+				}
+				add_handle(new_handle, name);
+			}
+		}
 	}
 
 	if (stat_only)
@@ -1019,6 +1108,7 @@ static void set_event_flags(struct pevent *pevent, struct event_str *list,
 }
 
 enum {
+	OPT_boundary	= 248,
 	OPT_stat	= 249,
 	OPT_pid		= 250,
 	OPT_nodate	= 251,
@@ -1079,6 +1169,7 @@ void trace_report (int argc, char **argv)
 				OPT_check_event_parsing},
 			{"nodate", no_argument, NULL, OPT_nodate},
 			{"stat", no_argument, NULL, OPT_stat},
+			{"boundary", no_argument, NULL, OPT_boundary},
 			{"help", no_argument, NULL, '?'},
 			{NULL, 0, NULL, 0}
 		};
@@ -1186,6 +1277,10 @@ void trace_report (int argc, char **argv)
 		case OPT_stat:
 			show_stat = 1;
 			break;
+		case OPT_boundary:
+			/* Debug to look at buffer breaks */
+			buffer_breaks = 1;
+			break;
 		default:
 			usage(argv);
 		}
@@ -1209,7 +1304,9 @@ void trace_report (int argc, char **argv)
 		handle = read_trace_header(inputs->file);
 		if (!handle)
 			die("error reading header for %s", inputs->file);
-		add_handle(handle, inputs->file);
+
+		/* If used with instances, top instance will have no tag */
+		add_handle(handle, multi_inputs ? inputs->file : NULL);
 
 		if (no_date)
 			tracecmd_set_flag(handle, TRACECMD_FL_IGNORE_DATE);

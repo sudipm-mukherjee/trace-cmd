@@ -133,6 +133,16 @@ OPTIONS
     latency tracers. This option prevents the function tracer from being
     enabled at start up.
 
+*-D*::
+    The option *-d* will try to use the function-trace option to disable the
+    function tracer (if available), otherwise it defaults to the proc file:
+    /proc/sys/kernel/ftrace_enabled, but will not touch it if the function-trace
+    option is available.  The *-D* option will disable both the ftrace_enabled
+    proc file as well as the function-trace option if it exists.
+
+    Note, this disable function tracing for all users, which includes users
+    outside of ftrace tracers (stack_tracer, perf, etc).
+
 *-O* 'option'::
     Ftrace has various options that can be enabled or disabled. This allows
     you to set them. Appending the text 'no' to an option disables it.
@@ -164,6 +174,44 @@ OPTIONS
     ring buffer is per CPU, this size is the size of each per CPU ring buffer
     inside the kernel. Using "-b 10000" on a machine with 4 CPUs will make
     Ftrace have a total buffer size of 40 Megs.
+
+*-B* 'buffer-name'::
+    If the kernel supports multiple buffers, this will add a buffer with
+    the given name. If the buffer name already exists, that buffer is just
+    reset and will not be deleted at the end of record execution. If the
+    buffer is created, it will be removed at the end of execution (unless
+    the *-k* is set, or 'start' command was used).
+
+    After a buffer name is stated, all events added after that will be
+    associated with that buffer. If no buffer is specified, or an event
+    is specified before a buffer name, it will be associated with the
+    main (toplevel) buffer.
+
+     trace-cmd record -e sched -B block -e block -B time -e timer sleep 1
+
+    The above is will enable all sched events in the main buffer. It will
+    then create a 'block' buffer instance and enable all block events within
+    that buffer. A 'time' buffer instance is created and all timer events
+    will be enabled for that event.
+
+*-m* 'size'::
+    The max size in kilobytes that a per cpu buffer should be. Note, due
+    to rounding to page size, the number may not be totally correct.
+    Also, this is performed by switching between two buffers that are half
+    the given size thus the output may not be of the given size even if
+    much more was written.
+
+    Use this to prevent running out of diskspace for long runs.
+
+*-M* 'cpumask'::
+    Set the cpumask for to trace. It only affects the last buffer instance
+    given. If supplied before any buffer instance, then it affects the
+    main buffer. The value supplied must be a hex number.
+
+     trace-cmd record -p function -M c -B events13 -e all -M 5
+
+    If the -M is left out, then the mask stays the same. To enable all
+    CPUs, pass in a value of '-1'.
 
 *-k*::
     By default, when trace-cmd is finished tracing, it will reset the buffers

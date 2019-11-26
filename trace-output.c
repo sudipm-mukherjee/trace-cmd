@@ -110,17 +110,12 @@ static unsigned long long convert_endian_8(struct tracecmd_output *handle,
 	return __data2host8(handle->pevent, val);
 }
 
-void tracecmd_output_close(struct tracecmd_output *handle)
+void tracecmd_output_free(struct tracecmd_output *handle)
 {
 	struct tracecmd_option *option;
 
 	if (!handle)
 		return;
-
-	if (handle->fd >= 0) {
-		close(handle->fd);
-		handle->fd = -1;
-	}
 
 	if (handle->tracing_dir)
 		free(handle->tracing_dir);
@@ -139,6 +134,18 @@ void tracecmd_output_close(struct tracecmd_output *handle)
 	free(handle);
 }
 
+void tracecmd_output_close(struct tracecmd_output *handle)
+{
+	if (!handle)
+		return;
+
+	if (handle->fd >= 0) {
+		close(handle->fd);
+		handle->fd = -1;
+	}
+
+	tracecmd_output_free(handle);
+}
 static unsigned long get_size_fd(int fd)
 {
 	unsigned long long size = 0;
@@ -1202,6 +1209,7 @@ int tracecmd_attach_cpu_data_fd(int fd, int cpus, char * const *cpu_data_files)
 	handle->pevent = tracecmd_get_pevent(ihandle);
 	pevent_ref(pevent);
 	handle->page_size = tracecmd_page_size(ihandle);
+	list_head_init(&handle->options);
 
 	if (tracecmd_append_cpu_data(handle, cpus, cpu_data_files) >= 0)
 		ret = 0;

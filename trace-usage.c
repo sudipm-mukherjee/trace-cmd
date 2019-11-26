@@ -19,7 +19,7 @@ static struct usage_help usage_help[] = {
 		" %s record [-v][-e event [-f filter]][-p plugin][-F][-d][-D][-o file] \\\n"
 		"           [-s usecs][-O option ][-l func][-g func][-n func] \\\n"
 		"           [-P pid][-N host:port][-t][-r prio][-b size][-B buf][command ...]\n"
-		"           [-m max]\n"
+		"           [-m max][-C clock]\n"
 		"          -e run command with event enabled\n"
 		"          -f filter for previous -e event\n"
 		"          -R trigger for previous -e event\n"
@@ -27,6 +27,7 @@ static struct usage_help usage_help[] = {
 		"          -F filter only on the given process\n"
 		"          -P trace the given pid like -F for the command\n"
 		"          -c also trace the childen of -F\n"
+		"          -C set the trace clock\n"
 		"          -T do a stacktrace on all events\n"
 		"          -l filter function name\n"
 		"          -g set graph function\n"
@@ -40,12 +41,14 @@ static struct usage_help usage_help[] = {
 		"          -O option to enable (or disable)\n"
 		"          -r real time priority to run the capture threads\n"
 		"          -s sleep interval between recording (in usecs) [default: 1000]\n"
+		"          -S used with --profile, to enable only events in command line\n"
 		"          -N host:port to connect to (see listen)\n"
 		"          -t used with -N, forces use of tcp in live trace\n"
 		"          -b change kernel buffersize (in kilobytes per CPU)\n"
 		"          -B create sub buffer and folling events will be enabled here\n"
 		"          -k do not reset the buffers after tracing.\n"
 		"          -i do not fail if an event is not found\n"
+		"          --profile enable tracing options needed for report --profile\n"
 		"          --func-stack perform a stack trace for function tracer\n"
 		"             (use with caution)\n"
 	},
@@ -141,13 +144,31 @@ static struct usage_help usage_help[] = {
 		"          -O plugin option -O [plugin:]var[=val]\n"
 		"          --check-events return whether all event formats can be parsed\n"
 		"          --stat - show the buffer stats that were reported at the end of the record.\n"
+		"          --profile report stats on where tasks are blocked and such\n"
 
+	},
+	{
+		"stream",
+		"Start tracing and read the output directly",
+		" %s stream [-e event][-p plugin][-d][-O option ][-P pid]\n"
+		"          Uses same options as record but does not write to files or the network.\n"
+	},
+	{
+		"profile",
+		"Start profiling and read the output directly",
+		" %s profile [-e event][-p plugin][-d][-O option ][-P pid][-S][-o output]\n"
+		"          Uses same options as record --profile.\n"
 	},
 	{
 		"hist",
 		"show a historgram of the trace.dat information",
 		" %s hist [-i file][-P] [file]"
 		"          -P ignore pids (compact all functions)\n"
+	},
+	{
+		"stat",
+		"show the status of the running tracing (ftrace) system",
+		" %s stat"
 	},
 	{
 		"split",
@@ -196,6 +217,7 @@ static struct usage_help usage_help[] = {
 		"          -P list loaded plugin files (by path)\n"
 		"          -O list plugin options\n"
 		"          -B list defined buffer instances\n"
+		"          -C list the defined clocks (and active one)\n"
 	},
 	{
 		"restore",

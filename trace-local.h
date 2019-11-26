@@ -24,6 +24,9 @@
 #include <dirent.h>	/* for DIR */
 
 #include "trace-cmd.h"
+#include "event-utils.h"
+
+extern int debug;
 
 /* fix stupid glib guint64 typecasts and printf formats */
 typedef unsigned long long u64;
@@ -62,6 +65,8 @@ void trace_listen(int argc, char **argv);
 
 void trace_restore(int argc, char **argv);
 
+void trace_check_events(int argc, char **argv);
+
 void trace_stack(int argc, char **argv);
 
 void trace_option(int argc, char **argv);
@@ -74,10 +79,14 @@ void trace_mem(int argc, char **argv);
 
 void trace_stat(int argc, char **argv);
 
+void trace_show(int argc, char **argv);
+
+void trace_list(int argc, char **argv);
+
+void trace_usage(int argc, char **argv);
+
 struct hook_list;
 
-int trace_profile_record(struct tracecmd_input *handle,
-			 struct pevent_record *record, int cpu);
 void trace_init_profile(struct tracecmd_input *handle, struct hook_list *hooks,
 			int global);
 int trace_profile(void);
@@ -85,12 +94,11 @@ void trace_profile_set_merge_like_comms(void);
 
 struct tracecmd_input *
 trace_stream_init(struct buffer_instance *instance, int cpu, int fd, int cpus,
-		  int profile, struct hook_list *hooks, int global);
-int trace_stream_read(struct pid_record_data *pids, int nr_pids, struct timeval *tv,
-		      int profile);
+		  struct hook_list *hooks,
+		  tracecmd_handle_init_func handle_init, int global);
+int trace_stream_read(struct pid_record_data *pids, int nr_pids, struct timeval *tv);
 
-void trace_show_data(struct tracecmd_input *handle, struct pevent_record *record,
-		     int profile);
+void trace_show_data(struct tracecmd_input *handle, struct pevent_record *record);
 
 /* --- event interation --- */
 
@@ -143,7 +151,7 @@ struct func_list {
 struct buffer_instance {
 	struct buffer_instance	*next;
 	const char		*name;
-	const char		*cpumask;
+	char			*cpumask;
 	struct event_list	*events;
 	struct event_list	**event_next;
 
@@ -183,6 +191,13 @@ char *get_instance_file(struct buffer_instance *instance, const char *file);
 void update_first_instance(struct buffer_instance *instance, int topt);
 
 void show_instance_file(struct buffer_instance *instance, const char *name);
+
 int count_cpus(void);
+
+/* No longer in event-utils.h */
+void die(const char *fmt, ...); /* Can be overriden */
+void *malloc_or_die(unsigned int size); /* Can be overridden */
+void __die(const char *fmt, ...);
+void __vdie(const char *fmt, ...);
 
 #endif /* __TRACE_LOCAL_H */

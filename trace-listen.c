@@ -33,8 +33,14 @@
 #include <errno.h>
 
 #include "trace-local.h"
+#include "trace-msg.h"
 
 #define MAX_OPTION_SIZE 4096
+
+#define _VAR_DIR_Q(dir)		#dir
+#define VAR_DIR_Q(dir)		_VAR_DIR_Q(dir)
+
+#define VAR_RUN_DIR		VAR_DIR_Q(VAR_DIR) "/run"
 
 static char *default_output_dir = ".";
 static char *output_dir;
@@ -43,11 +49,11 @@ static char *output_file;
 
 static FILE *logfp;
 
-static int debug;
-
-static int use_tcp;
-
 static int backlog = 5;
+
+static int proto_ver;
+
+static int do_daemon;
 
 #define  TEMP_FILE_STR "%s.%s:%s.cpu%d", output_file, host, port, cpu
 static char *get_temp_file(const char *host, const char *port, int cpu)
@@ -56,7 +62,9 @@ static char *get_temp_file(const char *host, const char *port, int cpu)
 	int size;
 
 	size = snprintf(file, 0, TEMP_FILE_STR);
-	file = malloc_or_die(size + 1);
+	file = malloc(size + 1);
+	if (!file)
+		return NULL;
 	sprintf(file, TEMP_FILE_STR);
 
 	return file;
@@ -112,10 +120,9 @@ static int process_option(char *option)
 	return 0;
 }
 
-static int done;
 static void finish(int sig)
 {
-	done = 1;
+	done = true;
 }
 
 #define LOG_BUF_SIZE 1024
@@ -144,16 +151,36 @@ static void __plog(const char *prefix, const char *fmt, va_list ap,
 	fprintf(fp, "%.*s", r, buf);
 }
 
-static void plog(const char *fmt, ...)
+void plog(const char *fmt, ...)
 {
 	va_list ap;
 
 	va_start(ap, fmt);
 	__plog("", fmt, ap, stdout);
 	va_end(ap);
+	/* Make sure it gets to the screen, in case we crash afterward */
+	fflush(stdout);
 }
 
-static void pdie(const char *fmt, ...)
+static void make_pid_name(int mode, char *buf)
+{
+	snprintf(buf, PATH_MAX, VAR_RUN_DIR "/trace-cmd-net.pid");
+}
+
+static void remove_pid_file(void)
+{
+	char buf[PATH_MAX];
+	int mode = do_daemon;
+
+	if (!do_daemon)
+		return;
+
+	make_pid_name(mode, buf);
+
+	unlink(buf);
+}
+
+void pdie(const char *fmt, ...)
 {
 	va_list ap;
 	char *str = "";
@@ -167,11 +194,14 @@ static void pdie(const char *fmt, ...)
 		fprintf(logfp, "\n%s\n", str);
 	else
 		fprintf(stderr, "\n%s\n", str);
+
+	remove_pid_file();
+
 	exit(-1);
 }
 
-static void process_udp_child(int sfd, const char *host, const char *port,
-			      int cpu, int page_size)
+static int process_udp_child(int sfd, const char *host, const char *port,
+			     int cpu, int page_size)
 {
 	struct sockaddr_storage peer_addr;
 	socklen_t peer_addr_len;
@@ -185,6 +215,9 @@ static void process_udp_child(int sfd, const char *host, const char *port,
 	signal_setup(SIGUSR1, finish);
 
 	tempfile = get_temp_file(host, port, cpu);
+	if (!tempfile)
+		return -ENOMEM;
+
 	fd = open(tempfile, O_WRONLY | O_TRUNC | O_CREAT, 0644);
 	if (fd < 0)
 		pdie("creating %s", tempfile);
@@ -275,13 +308,18 @@ static int udp_bind_a_port(int start_port, int *sfd)
 static void fork_udp_reader(int sfd, const char *node, const char *port,
 			    int *pid, int cpu, int pagesize)
 {
+	int ret;
+
 	*pid = fork();
 
 	if (*pid < 0)
 		pdie("creating udp reader");
 
-	if (!*pid)
-		process_udp_child(sfd, node, port, cpu, pagesize);
+	if (!*pid) {
+		ret = process_udp_child(sfd, node, port, cpu, pagesize);
+		if (ret < 0)
+			pdie("Problem with udp reader %d", ret);
+	}
 
 	close(sfd);
 }
@@ -307,79 +345,140 @@ static int open_udp(const char *node, const char *port, int *pid,
 
 static int communicate_with_client(int fd, int *cpus, int *pagesize)
 {
+	char *last_proto = NULL;
 	char buf[BUFSIZ];
 	char *option;
 	int options;
 	int size;
 	int n, s, t, i;
+	int ret = -EINVAL;
 
 	/* Let the client know what we are */
 	write(fd, "tracecmd", 8);
 
+ try_again:
 	/* read back the CPU count */
 	n = read_string(fd, buf, BUFSIZ);
 	if (n == BUFSIZ)
 		/** ERROR **/
-		return -1;
+		return -EINVAL;
 
 	*cpus = atoi(buf);
 
-	plog("cpus=%d\n", *cpus);
-	if (*cpus < 0)
-		return -1;
+	/* Is the client using the new protocol? */
+	if (*cpus == -1) {
+		if (memcmp(buf, V2_CPU, n) != 0) {
+			/* If it did not send a version, then bail */
+			if (memcmp(buf, "-1V", 3)) {
+				plog("Unknown string %s\n", buf);
+				goto out;
+			}
+			/* Skip "-1" */
+			plog("Cannot handle the protocol %s\n", buf+2);
 
-	/* next read the page size */
-	n = read_string(fd, buf, BUFSIZ);
-	if (n == BUFSIZ)
-		/** ERROR **/
-		return -1;
+			/* If it returned the same command as last time, bail! */
+			if (last_proto && strncmp(last_proto, buf, n) == 0) {
+				plog("Repeat of version %s sent\n", last_proto);
+				goto out;
+			}
+			free(last_proto);
+			last_proto = malloc(n + 1);
+			if (last_proto) {
+				memcpy(last_proto, buf, n);
+				last_proto[n] = 0;
+			}
+			/* Return the highest protocol we can use */
+			write(fd, "V2", 3);
+			goto try_again;
+		}
 
-	*pagesize = atoi(buf);
+		/* Let the client know we use v2 protocol */
+		write(fd, "V2", 3);
 
-	plog("pagesize=%d\n", *pagesize);
-	if (*pagesize <= 0)
-		return -1;
+		/* read the rest of dummy data */
+		n = read(fd, buf, sizeof(V2_MAGIC));
+		if (memcmp(buf, V2_MAGIC, n) != 0)
+			goto out;
 
-	/* Now the number of options */
-	n = read_string(fd, buf, BUFSIZ);
-	if (n == BUFSIZ)
-		/** ERROR **/
-		return -1;
+		/* We're off! */
+		write(fd, "OK", 2);
 
-	options = atoi(buf);
+		proto_ver = V2_PROTOCOL;
 
-	for (i = 0; i < options; i++) {
-		/* next is the size of the options */
+		/* read the CPU count, the page size, and options */
+		if (tracecmd_msg_initial_setting(fd, cpus, pagesize) < 0)
+			goto out;
+	} else {
+		/* The client is using the v1 protocol */
+
+		plog("cpus=%d\n", *cpus);
+		if (*cpus < 0)
+			goto out;
+
+		/* next read the page size */
 		n = read_string(fd, buf, BUFSIZ);
 		if (n == BUFSIZ)
 			/** ERROR **/
-			return -1;
-		size = atoi(buf);
-		/* prevent a client from killing us */
-		if (size > MAX_OPTION_SIZE)
-			return -1;
-		option = malloc_or_die(size);
-		do {
-			t = size;
-			s = 0;
-			s = read(fd, option+s, t);
-			if (s <= 0)
-				return -1;
-			t -= s;
-			s = size - t;
-		} while (t);
+			goto out;
 
-		s = process_option(option);
-		free(option);
-		/* do we understand this option? */
-		if (!s)
-			return -1;
+		*pagesize = atoi(buf);
+
+		plog("pagesize=%d\n", *pagesize);
+		if (*pagesize <= 0)
+			goto out;
+
+		/* Now the number of options */
+		n = read_string(fd, buf, BUFSIZ);
+ 		if (n == BUFSIZ)
+			/** ERROR **/
+			return -EINVAL;
+
+		options = atoi(buf);
+
+		for (i = 0; i < options; i++) {
+			/* next is the size of the options */
+			n = read_string(fd, buf, BUFSIZ);
+			if (n == BUFSIZ)
+				/** ERROR **/
+				goto out;
+			size = atoi(buf);
+			/* prevent a client from killing us */
+			if (size > MAX_OPTION_SIZE)
+				goto out;
+
+			ret = -ENOMEM;
+			option = malloc(size);
+			if (!option)
+				goto out;
+
+			ret = -EIO;
+			do {
+				t = size;
+				s = 0;
+				s = read(fd, option+s, t);
+				if (s <= 0)
+					goto out;
+				t -= s;
+				s = size - t;
+			} while (t);
+
+			s = process_option(option);
+			free(option);
+			/* do we understand this option? */
+			ret = -EINVAL;
+			if (!s)
+				goto out;
+		}
 	}
 
 	if (use_tcp)
 		plog("Using TCP for live connection\n");
 
-	return 0;
+	ret = 0;
+ out:
+	free(last_proto);
+
+	return ret;
 }
 
 static int create_client_file(const char *node, const char *port)
@@ -408,6 +507,8 @@ static void destroy_all_readers(int cpus, int *pid_array, const char *node,
 			pid_array[cpu] = 0;
 		}
 	}
+
+	free(pid_array);
 }
 
 static int *create_all_readers(int cpus, const char *node, const char *port,
@@ -421,8 +522,16 @@ static int *create_all_readers(int cpus, const char *node, const char *port,
 	int cpu;
 	int pid;
 
-	port_array = malloc_or_die(sizeof(int) * cpus);
-	pid_array = malloc_or_die(sizeof(int) * cpus);
+	port_array = malloc(sizeof(int) * cpus);
+	if (!port_array)
+		return NULL;
+
+	pid_array = malloc(sizeof(int) * cpus);
+	if (!pid_array) {
+		free(port_array);
+		return NULL;
+	}
+
 	memset(pid_array, 0, sizeof(int) * cpus);
 
 	start_port = START_PORT_SEARCH;
@@ -442,14 +551,20 @@ static int *create_all_readers(int cpus, const char *node, const char *port,
 		start_port = udp_port + 1;
 	}
 
-	/* send the client a comma deliminated set of port numbers */
-	for (cpu = 0; cpu < cpus; cpu++) {
-		snprintf(buf, BUFSIZ, "%s%d",
-			 cpu ? "," : "", port_array[cpu]);
-		write(fd, buf, strlen(buf));
+	if (proto_ver == V2_PROTOCOL) {
+		/* send set of port numbers to the client */
+		if (tracecmd_msg_send_port_array(fd, cpus, port_array) < 0)
+			goto out_free;
+	} else {
+		/* send the client a comma deliminated set of port numbers */
+		for (cpu = 0; cpu < cpus; cpu++) {
+			snprintf(buf, BUFSIZ, "%s%d",
+				 cpu ? "," : "", port_array[cpu]);
+			write(fd, buf, strlen(buf));
+		}
+		/* end with null terminator */
+		write(fd, "\0", 1);
 	}
-	/* end with null terminator */
-	write(fd, "\0", 1);
 
 	return pid_array;
 
@@ -495,40 +610,57 @@ static void stop_all_readers(int cpus, int *pid_array)
 	}
 }
 
-static void put_together_file(int cpus, int ofd, const char *node,
+static int put_together_file(int cpus, int ofd, const char *node,
 			      const char *port)
 {
 	char **temp_files;
 	int cpu;
+	int ret = -ENOMEM;
 
 	/* Now put together the file */
-	temp_files = malloc_or_die(sizeof(*temp_files) * cpus);
+	temp_files = malloc(sizeof(*temp_files) * cpus);
+	if (!temp_files)
+		return -ENOMEM;
 
-	for (cpu = 0; cpu < cpus; cpu++)
+	for (cpu = 0; cpu < cpus; cpu++) {
 		temp_files[cpu] = get_temp_file(node, port, cpu);
+		if (!temp_files[cpu])
+			goto out;
+	}
 
 	tracecmd_attach_cpu_data_fd(ofd, cpus, temp_files);
+	ret = 0;
+ out:
+	for (cpu--; cpu >= 0; cpu--) {
+		put_temp_file(temp_files[cpu]);
+	}
 	free(temp_files);
+	return ret;
 }
 
-static void process_client(const char *node, const char *port, int fd)
+static int process_client(const char *node, const char *port, int fd)
 {
 	int *pid_array;
 	int pagesize;
 	int cpus;
 	int ofd;
+	int ret;
 
-	if (communicate_with_client(fd, &cpus, &pagesize) < 0)
-		return;
+	ret = communicate_with_client(fd, &cpus, &pagesize);
+	if (ret < 0)
+		return ret;
 
 	ofd = create_client_file(node, port);
 
 	pid_array = create_all_readers(cpus, node, port, pagesize, fd);
 	if (!pid_array)
-		return;
+		return -ENOMEM;
 
 	/* Now we are ready to start reading data from the client */
-	collect_metadata_from_client(fd, ofd);
+	if (proto_ver == V2_PROTOCOL)
+		tracecmd_msg_collect_metadata(fd, ofd);
+	else
+		collect_metadata_from_client(fd, ofd);
 
 	/* wait a little to let our readers finish reading */
 	sleep(1);
@@ -539,9 +671,11 @@ static void process_client(const char *node, const char *port, int fd)
 	/* wait a little to have the readers clean up */
 	sleep(1);
 
-	put_together_file(cpus, ofd, node, port);
+	ret = put_together_file(cpus, ofd, node, port);
 
 	destroy_all_readers(cpus, pid_array, node, port);
+
+	return ret;
 }
 
 static int do_fork(int cfd)
@@ -604,23 +738,33 @@ static int do_connection(int cfd, struct sockaddr_storage *peer_addr,
 }
 
 static int *client_pids;
+static int free_pids;
 static int saved_pids;
-static int size_pids;
-#define PIDS_BLOCK 32
 
 static void add_process(int pid)
 {
-	if (!client_pids) {
-		size_pids = PIDS_BLOCK;
-		client_pids = malloc_or_die(sizeof(*client_pids) * size_pids);
-	} else if (!(saved_pids % PIDS_BLOCK)) {
-		size_pids += PIDS_BLOCK;
-		client_pids = realloc(client_pids,
-				      sizeof(*client_pids) * size_pids);
-		if (!client_pids)
-			pdie("realloc of pids");
+	int *client = NULL;
+	int i;
+
+	if (free_pids) {
+		for (i = 0; i < saved_pids; i++) {
+			if (!client_pids[i]) {
+				client = &client_pids[i];
+				break;
+			}
+		}
+		free_pids--;
+		if (!client)
+			warning("Could not find free pid");
 	}
-	client_pids[saved_pids++] = pid;
+	if (!client) {
+		client_pids = realloc(client_pids,
+				      sizeof(*client_pids) * (saved_pids + 1));
+		if (!client_pids)
+			pdie("allocating pids");
+		client = &client_pids[saved_pids++];
+	}
+	*client = pid;
 }
 
 static void remove_process(int pid)
@@ -635,14 +779,8 @@ static void remove_process(int pid)
 	if (i == saved_pids)
 		return;
 
-	saved_pids--;
-
-	if (saved_pids == i)
-		return;
-
-	memmove(&client_pids[i], &client_pids[i+1],
-		sizeof(*client_pids) * (saved_pids - i));
-
+	client_pids[i] = 0;
+	free_pids++;
 }
 
 static void kill_clients(void)
@@ -651,6 +789,8 @@ static void kill_clients(void)
 	int i;
 
 	for (i = 0; i < saved_pids; i++) {
+		if (!client_pids[i])
+			continue;
 		kill(client_pids[i], SIGINT);
 		waitpid(client_pids[i], &status, 0);
 	}
@@ -658,7 +798,7 @@ static void kill_clients(void)
 	saved_pids = 0;
 }
 
-static void clean_up(int sig)
+static void clean_up(void)
 {
 	int status;
 	int ret;
@@ -682,9 +822,10 @@ static void do_accept_loop(int sfd)
 	do {
 		cfd = accept(sfd, (struct sockaddr *)&peer_addr,
 			     &peer_addr_len);
-		printf("connected!\n");
-		if (cfd < 0 && errno == EINTR)
+		if (cfd < 0 && errno == EINTR) {
+			clean_up();
 			continue;
+		}
 		if (cfd < 0)
 			pdie("connecting");
 
@@ -693,6 +834,34 @@ static void do_accept_loop(int sfd)
 			add_process(pid);
 
 	} while (!done);
+	/* Get any final stragglers */
+	clean_up();
+}
+
+static void make_pid_file(void)
+{
+	char buf[PATH_MAX];
+	int mode = do_daemon;
+	int fd;
+
+	if (!do_daemon)
+		return;
+
+	make_pid_name(mode, buf);
+
+	fd = open(buf, O_WRONLY | O_CREAT | O_TRUNC, 0644);
+	if (fd < 0) {
+		perror(buf);
+		return;
+	}
+
+	sprintf(buf, "%d\n", getpid());
+	write(fd, buf, strlen(buf));
+	close(fd);
+}
+
+static void sigstub(int sig)
+{
 }
 
 static void do_listen(char *port)
@@ -702,7 +871,9 @@ static void do_listen(char *port)
 	int sfd, s;
 
 	if (!debug)
-		signal_setup(SIGCHLD, clean_up);
+		signal_setup(SIGCHLD, sigstub);
+
+	make_pid_file();
 
 	memset(&hints, 0, sizeof(hints));
 	hints.ai_family = AF_UNSPEC;
@@ -736,10 +907,14 @@ static void do_listen(char *port)
 	do_accept_loop(sfd);
 
 	kill_clients();
+
+	remove_pid_file();
 }
 
 static void start_daemon(void)
 {
+	do_daemon = 1;
+
 	if (daemon(1, 0) < 0)
 		die("starting daemon");
 }

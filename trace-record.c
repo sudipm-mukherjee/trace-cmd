@@ -46,6 +46,7 @@
 #include <errno.h>
 
 #include "trace-local.h"
+#include "trace-msg.h"
 
 #define _STR(x) #x
 #define STR(x) _STR(x)
@@ -60,29 +61,23 @@
 #define STAMP		"stamp"
 #define FUNC_STACK_TRACE "func_stack_trace"
 
-#define UDP_MAX_PACKET (65536 - 20)
-
 enum trace_type {
 	TRACE_TYPE_RECORD	= 1,
 	TRACE_TYPE_START	= (1 << 1),
 	TRACE_TYPE_STREAM	= (1 << 2),
 	TRACE_TYPE_EXTRACT	= (1 << 3),
-	TRACE_TYPE_PROFILE	= (1 << 4) | TRACE_TYPE_STREAM,
 };
+
+static tracecmd_handle_init_func handle_init = NULL;
 
 static int rt_prio;
 
-static int use_tcp;
-
 static int keep;
-
-static unsigned int page_size;
 
 static const char *output_file = "trace.dat";
 
 static int latency;
 static int sleep_time = 1000;
-static int cpu_count;
 static int recorder_threads;
 static struct pid_record_data *pids;
 static int buffers;
@@ -91,7 +86,6 @@ static int buffers;
 static int clear_function_filters;
 
 static char *host;
-static int *client_ports;
 static int sfd;
 static struct tracecmd_output *network_handle;
 
@@ -113,6 +107,7 @@ static unsigned recorder_flags;
 /* Try a few times to get an accurate date */
 static int date2ts_tries = 5;
 
+static int proto_ver = V2_PROTOCOL;
 static struct func_list *graph_funcs;
 
 static int func_stack;
@@ -122,11 +117,15 @@ static int save_stdout = -1;
 struct filter_pids {
 	struct filter_pids *next;
 	int pid;
+	int exclude;
 };
 
 static struct filter_pids *filter_pids;
 static int nr_filter_pids;
 static int len_filter_pids;
+
+static int have_set_event_pid;
+static int have_event_fork;
 
 struct opt_list {
 	struct opt_list *next;
@@ -210,12 +209,14 @@ static void add_reset_file(const char *file, const char *val, int prio)
 	if (keep)
 		return;
 
-	reset = malloc_or_die(sizeof(*reset));
+	reset = malloc(sizeof(*reset));
+	if (!reset)
+		die("Failed to allocate reset");
 	reset->path = strdup(file);
 	reset->reset = strdup(val);
 	reset->prio = prio;
 	if (!reset->path || !reset->reset)
-		die("malloc");
+		die("Failed to allocate reset path or val");
 
 	while (*last && (*last)->prio > prio)
 		last = &(*last)->next;
@@ -232,7 +233,9 @@ static void add_reset_trigger(const char *file)
 	if (keep)
 		return;
 
-	reset = malloc_or_die(sizeof(*reset));
+	reset = malloc(sizeof(*reset));
+	if (!reset)
+		die("Failed to allocate reset");
 	reset->path = strdup(file);
 
 	reset->next = reset_triggers;
@@ -289,6 +292,35 @@ void add_instance(struct buffer_instance *instance)
 	buffers++;
 }
 
+static void test_set_event_pid(void)
+{
+	static int tested;
+	struct stat st;
+	char *path;
+	int ret;
+
+	if (tested)
+		return;
+
+	path = tracecmd_get_tracing_file("set_event_pid");
+	ret = stat(path, &st);
+	if (!ret) {
+		have_set_event_pid = 1;
+		reset_save_file(path, RESET_DEFAULT_PRIO);
+	}
+	tracecmd_put_tracing_file(path);
+
+	path = tracecmd_get_tracing_file("options/event-fork");
+	ret = stat(path, &st);
+	if (!ret) {
+		have_event_fork = 1;
+		reset_save_file(path, RESET_DEFAULT_PRIO);
+	}
+	tracecmd_put_tracing_file(path);
+
+	tested = 1;
+}
+
 /**
  * create_instance - allocate a new buffer instance
  * @name: The name of the instance (instance will point to this)
@@ -300,7 +332,9 @@ struct buffer_instance *create_instance(const char *name)
 {
 	struct buffer_instance *instance;
 
-	instance = malloc_or_die(sizeof(*instance));
+	instance = malloc(sizeof(*instance));
+	if (!instance)
+		return NULL;
 	memset(instance, 0, sizeof(*instance));
 	instance->name = name;
 
@@ -352,6 +386,8 @@ static int __add_all_instances(const char *tracing_dir)
 		free(instance_path);
 
 		instance = create_instance(name);
+		if (!instance)
+			die("Failed to create instance");
 		add_instance(instance);
 	}
 
@@ -445,11 +481,15 @@ static char *get_temp_file(struct buffer_instance *instance, int cpu)
 
 	if (name) {
 		size = snprintf(file, 0, "%s.%s.cpu%d", output_file, name, cpu);
-		file = malloc_or_die(size + 1);
+		file = malloc(size + 1);
+		if (!file)
+			die("Failed to allocate temp file for %s", name);
 		sprintf(file, "%s.%s.cpu%d", output_file, name, cpu);
 	} else {
 		size = snprintf(file, 0, "%s.cpu%d", output_file, cpu);
-		file = malloc_or_die(size + 1);
+		file = malloc(size + 1);
+		if (!file)
+			die("Failed to allocate temp file for %s", name);
 		sprintf(file, "%s.cpu%d", output_file, cpu);
 	}
 
@@ -564,7 +604,6 @@ static void delete_thread_data(void)
 static void stop_threads(enum trace_type type)
 {
 	struct timeval tv = { 0, 0 };
-	int profile = (type & TRACE_TYPE_PROFILE) == TRACE_TYPE_PROFILE;
 	int ret;
 	int i;
 
@@ -581,7 +620,7 @@ static void stop_threads(enum trace_type type)
 	/* Flush out the pipes */
 	if (type & TRACE_TYPE_STREAM) {
 		do {
-			ret = trace_stream_read(pids, recorder_threads, &tv, profile);
+			ret = trace_stream_read(pids, recorder_threads, &tv);
 		} while (ret > 0);
 	}
 
@@ -686,8 +725,10 @@ get_instance_file(struct buffer_instance *instance, const char *file)
 	char *path;
 
 	if (instance->name) {
-		buf = malloc_or_die(strlen(instance->name) +
+		buf = malloc(strlen(instance->name) +
 			     strlen(file) + strlen("instances//") + 1);
+		if (!buf)
+			die("Failed to allocate name for %s/%s", instance->name, file);
 		sprintf(buf, "instances/%s/%s", instance->name, file);
 
 		path = tracecmd_get_tracing_file(buf);
@@ -708,8 +749,10 @@ get_instance_dir(struct buffer_instance *instance)
 	if (!instance->name)
 		return NULL;
 
-	buf = malloc_or_die(strlen(instance->name) +
-			    strlen("instances/") + 1);
+	buf = malloc(strlen(instance->name) +
+		     strlen("instances/") + 1);
+	if (!buf)
+		die("Failed to allocate for instance %s", instance->name);
 	sprintf(buf, "instances/%s", instance->name);
 
 	path = tracecmd_get_tracing_file(buf);
@@ -756,13 +799,16 @@ static void reset_max_latency(void)
 	fclose(fp);
 }
 
-static void add_filter_pid(int pid)
+static void add_filter_pid(int pid, int exclude)
 {
 	struct filter_pids *p;
 	char buf[100];
 
-	p = malloc_or_die(sizeof(*p));
+	p = malloc(sizeof(*p));
+	if (!p)
+		die("Failed to allocate pid filter");
 	p->next = filter_pids;
+	p->exclude = exclude;
 	p->pid = pid;
 	filter_pids = p;
 	nr_filter_pids++;
@@ -832,6 +878,8 @@ static void update_ftrace_pids(int reset)
 	struct filter_pids *pid;
 
 	for (pid = filter_pids; pid; pid = pid->next) {
+		if (pid->exclude)
+			continue;
 		snprintf(buf, 100, "%d ", pid->pid);
 		update_ftrace_pid(buf, reset);
 		/* Only reset the first entry */
@@ -841,7 +889,6 @@ static void update_ftrace_pids(int reset)
 
 static void update_event_filters(struct buffer_instance *instance);
 static void update_pid_event_filters(struct buffer_instance *instance);
-static void enable_tracing(void);
 
 /**
  * make_pid_filter - create a filter string to all pids against @field
@@ -859,9 +906,14 @@ static char *make_pid_filter(char *curr_filter, const char *field)
 	struct filter_pids *p;
 	char *filter;
 	char *orit;
+	char *match;
 	char *str;
 	int curr_len = 0;
 	int len;
+
+	/* Use the new method if possible */
+	if (have_set_event_pid)
+		return NULL;
 
 	len = len_filter_pids + (strlen(field) + strlen("(==)||")) * nr_filter_pids;
 
@@ -875,7 +927,9 @@ static char *make_pid_filter(char *curr_filter, const char *field)
 		strcat(filter, ")&&(");
 		curr_len = strlen(filter);
 	} else
-		filter = malloc_or_die(len);
+		filter = malloc(len);
+	if (!filter)
+		die("Failed to allocate pid filter");
 
 	/* Last '||' that is not used will cover the \0 */
 	str = filter + curr_len;
@@ -885,7 +939,11 @@ static char *make_pid_filter(char *curr_filter, const char *field)
 			orit = "";
 		else
 			orit = "||";
-		len = sprintf(str, "%s(%s==%d)", orit, field, p->pid);
+		if (p->exclude)
+			match = "!=";
+		else
+			match = "==";
+		len = sprintf(str, "%s(%s%s%d)", orit, field, match, p->pid);
 		str += len;
 	}
 
@@ -901,7 +959,7 @@ static void update_task_filter(void)
 	int pid = getpid();
 
 	if (filter_task)
-		add_filter_pid(pid);
+		add_filter_pid(pid, 0);
 
 	if (!filter_pids)
 		return;
@@ -913,11 +971,25 @@ static void update_task_filter(void)
 		update_pid_event_filters(instance);
 }
 
+void tracecmd_filter_pid(int pid, int exclude)
+{
+	struct buffer_instance *instance;
+
+	add_filter_pid(pid, exclude);
+	common_pid_filter = make_pid_filter(NULL, "common_pid");
+
+	if (!filter_pids)
+		return;
+
+	update_ftrace_pids(1);
+	for_all_instances(instance)
+		update_pid_event_filters(instance);
+}
+
 static pid_t trace_waitpid(enum trace_type type, pid_t pid, int *status, int options)
 {
 	struct timeval tv = { 1, 0 };
 	int ret;
-	int profile = (type & TRACE_TYPE_PROFILE) == TRACE_TYPE_PROFILE;
 
 	if (type & TRACE_TYPE_STREAM)
 		options |= WNOHANG;
@@ -928,7 +1000,7 @@ static pid_t trace_waitpid(enum trace_type type, pid_t pid, int *status, int opt
 			return ret;
 
 		if (type & TRACE_TYPE_STREAM)
-			trace_stream_read(pids, recorder_threads, &tv, profile);
+			trace_stream_read(pids, recorder_threads, &tv);
 	} while (1);
 }
 #ifndef NO_PTRACE
@@ -948,7 +1020,9 @@ static char *append_pid_filter(char *curr_filter, const char *field, int pid)
 
 	if (!curr_filter) {
 		/* No need for +1 as we don't use the "||" */
-		filter = malloc_or_die(len);
+		filter = malloc(len);
+		if (!filter)
+			die("Failed to allocate pid filter");
 		sprintf(filter, "(%s==%d)", field, pid);
 	} else {
 		int indx = strlen(curr_filter);
@@ -973,6 +1047,8 @@ static void append_sched_event(struct event_list *event, const char *field, int 
 
 static void update_sched_events(struct buffer_instance *instance, int pid)
 {
+	if (have_set_event_pid)
+		return;
 	/*
 	 * Also make sure that the sched_switch to this pid
 	 * and wakeups of this pid are also traced.
@@ -983,14 +1059,33 @@ static void update_sched_events(struct buffer_instance *instance, int pid)
 	append_sched_event(instance->sched_wakeup_new_event, "pid", pid);
 }
 
+static int open_instance_fd(struct buffer_instance *instance,
+			    const char *file, int flags);
+
+static void add_event_pid(const char *buf, int len)
+{
+	struct buffer_instance *instance;
+	int fd;
+
+	for_all_instances(instance) {
+		fd = open_instance_fd(instance, "set_event_pid", O_WRONLY);
+		write(fd, buf, len);
+		close(fd);
+	}
+}
+
 static void add_new_filter_pid(int pid)
 {
 	struct buffer_instance *instance;
 	char buf[100];
+	int len;
 
-	add_filter_pid(pid);
-	sprintf(buf, "%d", pid);
+	add_filter_pid(pid, 0);
+	len = sprintf(buf, "%d", pid);
 	update_ftrace_pid(buf, 0);
+
+	if (have_set_event_pid)
+		return add_event_pid(buf, len);
 
 	common_pid_filter = append_pid_filter(common_pid_filter, "common_pid", pid);
 
@@ -1010,7 +1105,7 @@ static void ptrace_attach(int pid)
 		do_ptrace = 0;
 		return;
 	}
-	add_filter_pid(pid);
+	add_filter_pid(pid, 0);
 }
 
 static void enable_ptrace(void)
@@ -1077,7 +1172,7 @@ static void ptrace_wait(enum trace_type type, int main_pid)
 		 (!WIFEXITED(status) || pid != main_pid));
 }
 #else
-static inline void ptrace_wait(int main_pid) { }
+static inline void ptrace_wait(enum trace_type type, int main_pid) { }
 static inline void enable_ptrace(void) { }
 static inline void ptrace_attach(int pid) { }
 
@@ -1086,12 +1181,11 @@ static inline void ptrace_attach(int pid) { }
 static void trace_or_sleep(enum trace_type type)
 {
 	struct timeval tv = { 1 , 0 };
-	int profile = (type & TRACE_TYPE_PROFILE) == TRACE_TYPE_PROFILE;
 
 	if (do_ptrace && filter_pid >= 0)
 		ptrace_wait(type, filter_pid);
 	else if (type & TRACE_TYPE_STREAM)
-		trace_stream_read(pids, recorder_threads, &tv, profile);
+		trace_stream_read(pids, recorder_threads, &tv);
 	else
 		sleep(10);
 }
@@ -1106,7 +1200,7 @@ static void run_cmd(enum trace_type type, int argc, char **argv)
 	if (!pid) {
 		/* child */
 		update_task_filter();
-		enable_tracing();
+		tracecmd_enable_tracing();
 		enable_ptrace();
 		/*
 		 * If we are using stderr for stdout, switch
@@ -1125,7 +1219,7 @@ static void run_cmd(enum trace_type type, int argc, char **argv)
 		}
 	}
 	if (do_ptrace) {
-		add_filter_pid(pid);
+		add_filter_pid(pid, 0);
 		ptrace_wait(type, pid);
 	} else
 		trace_waitpid(type, pid, &status, 0);
@@ -1195,7 +1289,9 @@ static void save_option(const char *option)
 {
 	struct opt_list *opt;
 
-	opt = malloc_or_die(sizeof(*opt));
+	opt = malloc(sizeof(*opt));
+	if (!opt)
+		die("Failed to allocate option");
 	opt->next = options;
 	options = opt;
 	opt->option = option;
@@ -1474,7 +1570,7 @@ static int write_file(const char *file, const char *str, const char *type)
 	int fd;
 	int ret;
 
-	fd = open(file, O_WRONLY);
+	fd = open(file, O_WRONLY | O_TRUNC);
 	if (fd < 0)
 		die("opening to '%s'", file);
 	ret = write(fd, str, strlen(str));
@@ -1660,7 +1756,8 @@ static void update_reset_files(void)
 		reset = reset_files;
 		reset_files = reset->next;
 
-		write_file(reset->path, reset->reset, "reset");
+		if (!keep)
+			write_file(reset->path, reset->reset, "reset");
 		free(reset->path);
 		free(reset->reset);
 		free(reset);
@@ -1735,24 +1832,36 @@ static void check_tracing_enabled(void)
 	write(fd, "1", 1);
 }
 
+static int open_instance_fd(struct buffer_instance *instance,
+			    const char *file, int flags)
+{
+	int fd;
+	char *path;
+
+	path = get_instance_file(instance, file);
+	fd = open(path, flags);
+	if (fd < 0) {
+		/* instances may not be created yet */
+		if (is_top_instance(instance))
+			die("opening '%s'", path);
+	}
+	tracecmd_put_tracing_file(path);
+
+	return fd;
+}
+
 static int open_tracing_on(struct buffer_instance *instance)
 {
 	int fd = instance->tracing_on_fd;
-	char *path;
 
 	/* OK, we keep zero for stdin */
 	if (fd > 0)
 		return fd;
 
-	path = get_instance_file(instance, "tracing_on");
-	fd = open(path, O_RDWR | O_CLOEXEC);
+	fd = open_instance_fd(instance, "tracing_on", O_RDWR | O_CLOEXEC);
 	if (fd < 0) {
-		/* instances may not be created yet */
-		if (is_top_instance(instance))
-			die("opening '%s'", path);
 		return fd;
 	}
-	tracecmd_put_tracing_file(path);
 	instance->tracing_on_fd = fd;
 
 	return fd;
@@ -1795,7 +1904,7 @@ static int read_tracing_on(struct buffer_instance *instance)
 	return ret;
 }
 
-static void enable_tracing(void)
+void tracecmd_enable_tracing(void)
 {
 	struct buffer_instance *instance;
 
@@ -1808,7 +1917,7 @@ static void enable_tracing(void)
 		reset_max_latency();
 }
 
-static void disable_tracing(void)
+void tracecmd_disable_tracing(void)
 {
 	struct buffer_instance *instance;
 
@@ -1816,9 +1925,9 @@ static void disable_tracing(void)
 		write_tracing_on(instance, 0);
 }
 
-static void disable_all(int disable_tracer)
+void tracecmd_disable_all_tracing(int disable_tracer)
 {
-	disable_tracing();
+	tracecmd_disable_tracing();
 
 	if (disable_tracer) {
 		disable_func_stack_trace();
@@ -1870,7 +1979,9 @@ static void update_event_filters(struct buffer_instance *instance)
 					free_it = 1;
 					len = common_len + strlen(event->pid_filter) +
 						strlen(event->filter) + strlen("()&&(||)") + 1;
-					event_filter = malloc_or_die(len);
+					event_filter = malloc(len);
+					if (!event_filter)
+						die("Failed to allocate event_filter");
 					sprintf(event_filter, "(%s)&&(%s||%s)",
 						event->filter, common_pid_filter,
 						event->pid_filter);
@@ -1878,7 +1989,9 @@ static void update_event_filters(struct buffer_instance *instance)
 					free_it = 1;
 					len = common_len + strlen(event->filter) +
 						strlen("()&&()") + 1;
-					event_filter = malloc_or_die(len);
+					event_filter = malloc(len);
+					if (!event_filter)
+						die("Failed to allocate event_filter");
 					sprintf(event_filter, "(%s)&&(%s)",
 						event->filter, common_pid_filter);
 				}
@@ -1891,7 +2004,9 @@ static void update_event_filters(struct buffer_instance *instance)
 					free_it = 1;
 					len = common_len + strlen(event->pid_filter) +
 						strlen("||") + 1;
-					event_filter = malloc_or_die(len);
+					event_filter = malloc(len);
+					if (!event_filter)
+						die("Failed to allocate event_filter");
 					sprintf(event_filter, "%s||%s",
 						common_pid_filter, event->pid_filter);
 				} else
@@ -1905,8 +2020,55 @@ static void update_event_filters(struct buffer_instance *instance)
 	}
 }
 
+static void update_pid_filters(struct buffer_instance *instance)
+{
+	struct filter_pids *p;
+	char *filter;
+	char *str;
+	int len;
+	int ret;
+	int fd;
+
+	fd = open_instance_fd(instance, "set_event_pid",
+			      O_WRONLY | O_CLOEXEC | O_TRUNC);
+	if (fd < 0)
+		die("Failed to access set_event_pid");
+
+	len = len_filter_pids + nr_filter_pids;
+	filter = malloc(len);
+	if (!filter)
+		die("Failed to allocate pid filter");
+
+	str = filter;
+
+	for (p = filter_pids; p; p = p->next) {
+		if (p->exclude)
+			continue;
+		len = sprintf(str, "%d ", p->pid);
+		str += len;
+	}
+
+	if (filter == str)
+		goto out;
+
+	len = str - filter;
+	str = filter;
+	do {
+		ret = write(fd, str, len);
+		if (ret < 0)
+			die("Failed to write to set_event_pid");
+		str += ret;
+		len -= ret;
+	} while (ret >= 0 && len);
+
+ out:
+	close(fd);
+}
+
 static void update_pid_event_filters(struct buffer_instance *instance)
 {
+	if (have_set_event_pid)
+		return update_pid_filters(instance);
 	/*
 	 * Also make sure that the sched_switch to this pid
 	 * and wakeups of this pid are also traced.
@@ -1919,27 +2081,25 @@ static void update_pid_event_filters(struct buffer_instance *instance)
 	update_event_filters(instance);
 }
 
-static void set_mask(struct buffer_instance *instance)
+#define MASK_STR_MAX 4096 /* Don't expect more than 32768 CPUS */
+
+static char *alloc_mask_from_hex(const char *str)
 {
-	const char *mask = instance->cpumask;
-	struct stat st;
-	char cpumask[4096]; /* Don't expect more than 32768 CPUS */
-	char *path;
-	int fd;
-	int ret;
+	char *cpumask;
 
-	if (!mask)
-		return;
-
-	if (strcmp(mask, "-1") == 0) {
+	if (strcmp(str, "-1") == 0) {
 		/* set all CPUs */
 		int bytes = (cpu_count + 7) / 8;
 		int last = cpu_count % 8;
 		int i;
 
-		if (bytes > 4095) {
+		cpumask = malloc(MASK_STR_MAX);
+		if (!cpumask)
+			die("can't allocate cpumask");
+
+		if (bytes > (MASK_STR_MAX-1)) {
 			warning("cpumask can't handle more than 32768 CPUS!");
-			bytes = 4095;
+			bytes = MASK_STR_MAX-1;
 		}
 
 		sprintf(cpumask, "%x", (1 << last) - 1);
@@ -1948,9 +2108,24 @@ static void set_mask(struct buffer_instance *instance)
 			cpumask[i] = 'f';
 
 		cpumask[i+1] = 0;
-
-		mask = cpumask;
+	} else {
+		cpumask = strdup(str);
+		if (!cpumask)
+			die("can't allocate cpumask");
 	}
+
+	return cpumask;
+}
+
+static void set_mask(struct buffer_instance *instance)
+{
+	struct stat st;
+	char *path;
+	int fd;
+	int ret;
+
+	if (!instance->cpumask)
+		return;
 
 	path = get_instance_file(instance, "tracing_cpumask");
 	if (!path)
@@ -1958,8 +2133,7 @@ static void set_mask(struct buffer_instance *instance)
 
 	ret = stat(path, &st);
 	if (ret < 0) {
-		if (mask)
-			warning("%s not found", path);
+		warning("%s not found", path);
 		goto out;
 	}
 
@@ -1967,12 +2141,13 @@ static void set_mask(struct buffer_instance *instance)
 	if (fd < 0)
 		die("could not open %s\n", path);
 
-	if (mask)
-		write(fd, mask, strlen(mask));
+	write(fd, instance->cpumask, strlen(instance->cpumask));
 	
 	close(fd);
  out:
 	tracecmd_put_tracing_file(path);
+	free(instance->cpumask);
+	instance->cpumask = NULL;
 }
 
 static void enable_events(struct buffer_instance *instance)
@@ -1989,6 +2164,11 @@ static void enable_events(struct buffer_instance *instance)
 		if (event->neg)
 			update_event(event, NULL, 0, '0');
 	}
+}
+
+void tracecmd_enable_events(void)
+{
+	enable_events(first_instance);
 }
 
 static void set_clock(struct buffer_instance *instance)
@@ -2021,6 +2201,20 @@ static void set_clock(struct buffer_instance *instance)
 	write_instance_file(instance, "trace_clock", instance->clock, "clock");
 }
 
+static void set_max_graph_depth(struct buffer_instance *instance, char *max_graph_depth)
+{
+	char *path;
+	int ret;
+
+	path = get_instance_file(instance, "max_graph_depth");
+	reset_save_file(path, RESET_DEFAULT_PRIO);
+	tracecmd_put_tracing_file(path);
+	ret = write_instance_file(instance, "max_graph_depth", max_graph_depth,
+				  NULL);
+	if (ret < 0)
+		die("could not write to max_graph_depth");
+}
+
 static struct event_list *
 create_event(struct buffer_instance *instance, char *path, struct event_list *old_event)
 {
@@ -2029,7 +2223,9 @@ create_event(struct buffer_instance *instance, char *path, struct event_list *ol
 	char *p;
 	int ret;
 
-	event = malloc_or_die(sizeof(*event));
+	event = malloc(sizeof(*event));
+	if (!event)
+		die("Failed to allocate event");
 	*event = *old_event;
 	add_event(instance, event);
 
@@ -2042,7 +2238,9 @@ create_event(struct buffer_instance *instance, char *path, struct event_list *ol
 		if (*p == '/')
 			break;
 	*p = '\0';
-	p = malloc_or_die(strlen(path) + strlen("/enable") + 1);
+	p = malloc(strlen(path) + strlen("/enable") + 1);
+	if (!p)
+		die("Failed to allocate enable path for %s", path);
 	sprintf(p, "%s/enable", path);
 	ret = stat(p, &st);
 	if (ret >= 0)
@@ -2051,7 +2249,9 @@ create_event(struct buffer_instance *instance, char *path, struct event_list *ol
 		free(p);
 
 	if (event->trigger) {
-		p = malloc_or_die(strlen(path) + strlen("/trigger") + 1);
+		p = malloc(strlen(path) + strlen("/trigger") + 1);
+		if (!p)
+			die("Failed to allocate trigger path for %s", path);
 		sprintf(p, "%s/trigger", path);
 		ret = stat(p, &st);
 		if (ret > 0)
@@ -2073,7 +2273,9 @@ static void make_sched_event(struct buffer_instance *instance,
 	if (*event)
 		return;
 
-	path = malloc_or_die(strlen(sched->filter_file) + strlen(sched_path) + 2);
+	path = malloc(strlen(sched->filter_file) + strlen(sched_path) + 2);
+	if (!path)
+		die("Failed to allocate path for %s", sched_path);
 
 	sprintf(path, "%s", sched->filter_file);
 
@@ -2108,7 +2310,9 @@ static int expand_event_files(struct buffer_instance *instance,
 	int ret;
 	int i;
 
-	p = malloc_or_die(strlen(file) + strlen("events//filter") + 1);
+	p = malloc(strlen(file) + strlen("events//filter") + 1);
+	if (!p)
+		die("Failed to allocate event filter path for %s", file);
 	sprintf(p, "events/%s/filter", file);
 
 	path = get_instance_file(instance, p);
@@ -2127,7 +2331,7 @@ static int expand_event_files(struct buffer_instance *instance,
 		path = globbuf.gl_pathv[i];
 
 		event = create_event(instance, path, old_event);
-		printf("%s\n", path);
+		pr_stat("%s\n", path);
 
 		len = strlen(path);
 
@@ -2177,7 +2381,9 @@ static void expand_event(struct buffer_instance *instance, struct event_list *ev
 
 	if (ptr) {
 		len = ptr - name;
-		str = malloc_or_die(strlen(name) + 1); /* may add '*' */
+		str = malloc(strlen(name) + 1); /* may add '*' */
+		if (!str)
+			die("Failed to allocate event for %s", name);
 		strcpy(str, name);
 		str[len] = '/';
 		ptr++;
@@ -2197,7 +2403,9 @@ static void expand_event(struct buffer_instance *instance, struct event_list *ev
 	ret = expand_event_files(instance, name, event);
 
 	len = strlen(name) + strlen("*/") + 1;
-	str = malloc_or_die(len);
+	str = malloc(len);
+	if (!str)
+		die("Failed to allocate event for %s", name);
 	snprintf(str, len, "*/%s", name);
 	ret2 = expand_event_files(instance, str, event);
 	free(str);
@@ -2441,20 +2649,26 @@ static int create_recorder(struct buffer_instance *instance, int cpu,
 	exit(0);
 }
 
-static void communicate_with_listener(int fd)
+static void check_first_msg_from_server(int fd)
+{
+	char buf[BUFSIZ];
+
+	read(fd, buf, 8);
+
+	/* Make sure the server is the tracecmd server */
+	if (memcmp(buf, "tracecmd", 8) != 0)
+		die("server not tracecmd server");
+}
+
+static void communicate_with_listener_v1(int fd)
 {
 	char buf[BUFSIZ];
 	ssize_t n;
 	int cpu, i;
 
-	n = read(fd, buf, 8);
-
-	/* Make sure the server is the tracecmd server */
-	if (memcmp(buf, "tracecmd", 8) != 0)
-		die("server not tracecmd server");
+	check_first_msg_from_server(fd);
 
 	/* write the number of CPUs we have (in ASCII) */
-
 	sprintf(buf, "%d", cpu_count);
 
 	/* include \0 */
@@ -2488,7 +2702,9 @@ static void communicate_with_listener(int fd)
 		/* No options */
 		write(fd, "0", 2);
 
-	client_ports = malloc_or_die(sizeof(int) * cpu_count);
+	client_ports = malloc(sizeof(int) * cpu_count);
+	if (!client_ports)
+		die("Failed to allocate client ports for %d cpus", cpu_count);
 
 	/*
 	 * Now we will receive back a comma deliminated list
@@ -2506,6 +2722,56 @@ static void communicate_with_listener(int fd)
 			die("read bad port number");
 		buf[i] = 0;
 		client_ports[cpu] = atoi(buf);
+	}
+}
+
+static void communicate_with_listener_v2(int fd)
+{
+	if (tracecmd_msg_send_init_data(fd) < 0)
+		die("Cannot communicate with server");
+}
+
+static void check_protocol_version(int fd)
+{
+	char buf[BUFSIZ];
+	int n;
+
+	check_first_msg_from_server(fd);
+
+	/*
+	 * Write the protocol version, the magic number, and the dummy
+	 * option(0) (in ASCII). The client understands whether the client
+	 * uses the v2 protocol or not by checking a reply message from the
+	 * server. If the message is "V2", the server uses v2 protocol. On the
+	 * other hands, if the message is just number strings, the server
+	 * returned port numbers. So, in that time, the client understands the
+	 * server uses the v1 protocol. However, the old server tells the
+	 * client port numbers after reading cpu_count, page_size, and option.
+	 * So, we add the dummy number (the magic number and 0 option) to the
+	 * first client message.
+	 */
+	write(fd, V2_CPU, sizeof(V2_CPU));
+
+	/* read a reply message */
+	n = read(fd, buf, BUFSIZ);
+
+	if (n < 0 || !buf[0]) {
+		/* the server uses the v1 protocol, so we'll use it */
+		proto_ver = V1_PROTOCOL;
+		plog("Use the v1 protocol\n");
+	} else {
+		if (memcmp(buf, "V2", n) != 0)
+			die("Cannot handle the protocol %s", buf);
+		/* OK, let's use v2 protocol */
+		write(fd, V2_MAGIC, sizeof(V2_MAGIC));
+
+		n = read(fd, buf, BUFSIZ - 1);
+		if (n != 2 || memcmp(buf, "OK", 2) != 0) {
+			if (n < 0)
+				n  = 0;
+			buf[n] = 0;
+			die("Cannot handle the protocol %s", buf);
+		}
 	}
 }
 
@@ -2536,6 +2802,7 @@ static void setup_network(void)
 	hints.ai_family = AF_UNSPEC;
 	hints.ai_socktype = SOCK_STREAM;
 
+again:
 	s = getaddrinfo(server, port, &hints, &result);
 	if (s != 0)
 		die("getaddrinfo: %s", gai_strerror(s));
@@ -2556,23 +2823,38 @@ static void setup_network(void)
 
 	freeaddrinfo(result);
 
-	communicate_with_listener(sfd);
+	if (proto_ver == V2_PROTOCOL) {
+		check_protocol_version(sfd);
+		if (proto_ver == V1_PROTOCOL) {
+			/* reconnect to the server for using the v1 protocol */
+			close(sfd);
+			goto again;
+		}
+		communicate_with_listener_v2(sfd);
+	}
+
+	if (proto_ver == V1_PROTOCOL)
+		communicate_with_listener_v1(sfd);
 
 	/* Now create the handle through this socket */
 	network_handle = tracecmd_create_init_fd_glob(sfd, listed_events);
+
+	if (proto_ver == V2_PROTOCOL)
+		tracecmd_msg_finish_sending_metadata(sfd);
 
 	/* OK, we are all set, let'r rip! */
 }
 
 static void finish_network(void)
 {
+	if (proto_ver == V2_PROTOCOL)
+		tracecmd_msg_send_close_msg();
 	close(sfd);
 	free(host);
 }
 
 static void start_threads(enum trace_type type, int global)
 {
-	int profile = (type & TRACE_TYPE_PROFILE) == TRACE_TYPE_PROFILE;
 	struct buffer_instance *instance;
 	int *brass = NULL;
 	int i = 0;
@@ -2582,12 +2864,14 @@ static void start_threads(enum trace_type type, int global)
 		setup_network();
 
 	/* make a thread for every CPU we have */
-	pids = malloc_or_die(sizeof(*pids) * cpu_count * (buffers + 1));
+	pids = malloc(sizeof(*pids) * cpu_count * (buffers + 1));
+	if (!pids)
+		die("Failed to allocat pids for %d cpus", cpu_count);
 
 	memset(pids, 0, sizeof(*pids) * cpu_count * (buffers + 1));
 
 	for_all_instances(instance) {
-		int x;
+		int x, pid;
 		for (x = 0; x < cpu_count; x++) {
 			if (type & TRACE_TYPE_STREAM) {
 				brass = pids[i].brass;
@@ -2596,7 +2880,7 @@ static void start_threads(enum trace_type type, int global)
 					die("pipe");
 				pids[i].stream = trace_stream_init(instance, x,
 								   brass[0], cpu_count,
-								   profile, hooks,
+								   hooks, handle_init,
 								   global);
 				if (!pids[i].stream)
 					die("Creating stream for %d", i);
@@ -2606,9 +2890,11 @@ static void start_threads(enum trace_type type, int global)
 			pids[i].instance = instance;
 			/* Make sure all output is flushed before forking */
 			fflush(stdout);
-			pids[i++].pid = create_recorder(instance, x, type, brass);
+			pid = pids[i++].pid = create_recorder(instance, x, type, brass);
 			if (brass)
 				close(brass[1]);
+			if (pid > 0)
+				add_filter_pid(pid, 1);
 		}
 	}
 	recorder_threads = i;
@@ -2703,7 +2989,13 @@ static void print_stat(struct buffer_instance *instance)
 		trace_seq_do_printf(&instance->s_print[cpu]);
 }
 
-static void record_data(char *date2ts)
+enum {
+	DATA_FL_NONE		= 0,
+	DATA_FL_DATE		= 1,
+	DATA_FL_OFFSET		= 2,
+};
+
+static void record_data(char *date2ts, int flags)
 {
 	struct tracecmd_option **buffer_options;
 	struct tracecmd_output *handle;
@@ -2722,7 +3014,9 @@ static void record_data(char *date2ts)
 		if (!cpu_count)
 			return;
 
-		temp_files = malloc_or_die(sizeof(*temp_files) * cpu_count);
+		temp_files = malloc(sizeof(*temp_files) * cpu_count);
+		if (!temp_files)
+			die("Failed to allocate temp_files for %d cpus", cpu_count);
 
 		for (i = 0; i < cpu_count; i++)
 			temp_files[i] = get_temp_file(&top_instance, i);
@@ -2740,9 +3034,18 @@ static void record_data(char *date2ts)
 		if (!handle)
 			die("Error creating output file");
 
-		if (date2ts)
-			tracecmd_add_option(handle, TRACECMD_OPTION_DATE,
-					    strlen(date2ts)+1, date2ts);
+		if (date2ts) {
+			int type = 0;
+
+			if (flags & DATA_FL_DATE)
+				type = TRACECMD_OPTION_DATE;
+			else if (flags & DATA_FL_OFFSET)
+				type = TRACECMD_OPTION_OFFSET;
+
+			if (type)
+				tracecmd_add_option(handle, type,
+						    strlen(date2ts)+1, date2ts);
+		}
 
 		/* Only record the top instance under TRACECMD_OPTION_CPUSTAT*/
 		if (!no_top_instance()) {
@@ -2761,7 +3064,9 @@ static void record_data(char *date2ts)
 		add_uname(handle);
 
 		if (buffers) {
-			buffer_options = malloc_or_die(sizeof(*buffer_options) * buffers);
+			buffer_options = malloc(sizeof(*buffer_options) * buffers);
+			if (!buffer_options)
+				die("Failed to allocate buffer options");
 			i = 0;
 			for_each_instance(instance) {
 				buffer_options[i++] = tracecmd_add_buffer_option(handle, instance->name);
@@ -2792,13 +3097,16 @@ static void record_data(char *date2ts)
 	tracecmd_output_close(handle);
 }
 
-static void write_func_file(struct buffer_instance *instance,
+static int write_func_file(struct buffer_instance *instance,
 			    const char *file, struct func_list **list)
 {
 	struct func_list *item;
 	char *path;
 	int fd;
-	int ret;
+	int ret = -1;
+
+	if (!*list)
+		return 0;
 
 	path = get_instance_file(instance, file);
 
@@ -2818,15 +3126,16 @@ static void write_func_file(struct buffer_instance *instance,
 		free(item);
 	}
 	close(fd);
-
+	ret = 0;
  free:
 	tracecmd_put_tracing_file(path);
-	return;
+	return ret;
  failed:
 	die("Failed to write %s to %s.\n"
 	    "Perhaps this function is not available for tracing.\n"
 	    "run 'trace-cmd list -f %s' to see if it is.",
 	    item->func, file, item->func);
+	return ret;
 }
 
 static int functions_filtered(struct buffer_instance *instance)
@@ -2861,11 +3170,32 @@ static int functions_filtered(struct buffer_instance *instance)
 
 static void set_funcs(struct buffer_instance *instance)
 {
-	write_func_file(instance, "set_ftrace_filter", &instance->filter_funcs);
-	write_func_file(instance, "set_ftrace_notrace", &instance->notrace_funcs);
+	int set_notrace = 0;
+	int ret;
+
+	ret = write_func_file(instance, "set_ftrace_filter", &instance->filter_funcs);
+	if (ret < 0)
+		die("set_ftrace_filter does not exist. Can not filter functions");
+
 	/* graph tracing currently only works for top instance */
-	if (is_top_instance(instance))
-		write_func_file(instance, "set_graph_function", &graph_funcs);
+	if (is_top_instance(instance)) {
+		ret = write_func_file(instance, "set_graph_function", &graph_funcs);
+		if (ret < 0)
+			die("set_graph_function does not exist.");
+		if (instance->plugin && strcmp(instance->plugin, "function_graph") == 0) {
+			ret = write_func_file(instance, "set_graph_notrace",
+					      &instance->notrace_funcs);
+			if (!ret)
+				set_notrace = 1;
+		}
+		if (!set_notrace) {
+			ret = write_func_file(instance, "set_ftrace_notrace",
+					      &instance->notrace_funcs);
+			if (ret < 0)
+				die("set_ftrace_notrace does not exist. Can not filter functions");
+		}
+	} else
+		write_func_file(instance, "set_ftrace_notrace", &instance->notrace_funcs);
 
 	/* make sure we are filtering functions */
 	if (func_stack && is_top_instance(instance)) {
@@ -2880,7 +3210,9 @@ static void add_func(struct func_list **list, const char *func)
 {
 	struct func_list *item;
 
-	item = malloc_or_die(sizeof(*item));
+	item = malloc(sizeof(*item));
+	if (!item)
+		die("Failed to allocate function descriptor");
 	item->func = func;
 	item->next = *list;
 	*list = item;
@@ -2942,8 +3274,10 @@ static unsigned long long find_time_stamp(struct pevent *pevent)
 		goto out;
 
 	len = strlen(path);
-	file = malloc_or_die(len + strlen("trace_pipe_raw") + 32);
-	page = malloc_or_die(page_size);
+	file = malloc(len + strlen("trace_pipe_raw") + 32);
+	page = malloc(page_size);
+	if (!file || !page)
+		die("Failed to allocate time_stamp info");
 
 	while ((dent = readdir(dir))) {
 		const char *name = dent->d_name;
@@ -2993,12 +3327,12 @@ static char *read_instance_file(struct buffer_instance *instance, char *file, in
 		r = read(fd, buffer, BUFSIZ);
 		if (r <= 0)
 			continue;
-		if (size) {
+		if (size)
 			buf = realloc(buf, size+r+1);
-			if (!buf)
-				die("malloc");
-		} else
-			buf = malloc_or_die(r+1);
+		else
+			buf = malloc(r+1);
+		if (!buf)
+			die("Failed to allocate instance file buffer");
 		memcpy(buf+size, buffer, r);
 		size += r;
 	} while (r);
@@ -3074,15 +3408,15 @@ static char *get_date_to_ts(void)
 	}
 
 	for (i = 0; i < date2ts_tries; i++) {
-		disable_tracing();
+		tracecmd_disable_tracing();
 		clear_trace();
-		enable_tracing();
+		tracecmd_enable_tracing();
 
 		gettimeofday(&start, NULL);
 		write(tfd, STAMP, 5);
 		gettimeofday(&end, NULL);
 
-		disable_tracing();
+		tracecmd_disable_tracing();
 		ts = find_time_stamp(pevent);
 		if (!ts)
 			continue;
@@ -3306,7 +3640,7 @@ static void clear_func_filters(void)
 	struct buffer_instance *instance;
 	char *path;
 	int i;
-	const char const *files[] = { "set_ftrace_filter",
+	const char * const files[] = { "set_ftrace_filter",
 				      "set_ftrace_notrace",
 				      "set_graph_function",
 				      "set_graph_notrace",
@@ -3342,7 +3676,7 @@ static void make_instances(void)
 	}
 }
 
-static void remove_instances(void)
+void tracecmd_remove_instances(void)
 {
 	struct buffer_instance *instance;
 	char *path;
@@ -3362,6 +3696,25 @@ static void remove_instances(void)
 			die("rmdir %s", path);
 		tracecmd_put_tracing_file(path);
 	}
+}
+
+/**
+ * tracecmd_create_top_instance - create a top named instance
+ * @name: name of the instance to use.
+ *
+ * This is a library function for tools that want to do their tracing inside of
+ * an instance.  All it does is create an instance and set it as a top instance,
+ * you don't want to call this more than once, and you want to call
+ * tracecmd_remove_instances to undo your work.
+ */
+void tracecmd_create_top_instance(char *name)
+{
+	struct buffer_instance *instance;
+
+	instance = create_instance(name);
+	add_instance(instance);
+	update_first_instance(instance, 0);
+	make_instances();
 }
 
 static void check_plugin(const char *plugin)
@@ -3478,8 +3831,10 @@ static void allocate_seq(void)
 	struct buffer_instance *instance;
 
 	for_all_instances(instance) {
-		instance->s_save = malloc_or_die(sizeof(struct trace_seq) * cpu_count);
-		instance->s_print = malloc_or_die(sizeof(struct trace_seq) * cpu_count);
+		instance->s_save = malloc(sizeof(struct trace_seq) * cpu_count);
+		instance->s_print = malloc(sizeof(struct trace_seq) * cpu_count);
+		if (!instance->s_save || !instance->s_print)
+			die("Failed to allocate instance info");
 	}
 }
 
@@ -3567,7 +3922,9 @@ static void list_event(const char *event)
 {
 	struct tracecmd_event_list *list;
 
-	list = malloc_or_die(sizeof(*list));
+	list = malloc(sizeof(*list));
+	if (!list)
+		die("Failed to allocate list for event");
 	list->next = listed_events;
 	list->glob = event;
 	listed_events = list;
@@ -3584,7 +3941,9 @@ static void record_all_events(void)
 		listed_events = list->next;
 		free(list);
 	}
-	list = malloc_or_die(sizeof(*list));
+	list = malloc(sizeof(*list));
+	if (!list)
+		die("Failed to allocate list for all events");
 	list->next = NULL;
 	list->glob = ALL_EVENTS;
 	listed_events = list;
@@ -3604,7 +3963,9 @@ static void add_trigger(struct event_list *event, const char *trigger)
 		strcat(event->trigger, "\n");
 		strcat(event->trigger, trigger);
 	} else {
-		event->trigger = malloc_or_die(strlen(trigger) + 1);
+		event->trigger = malloc(strlen(trigger) + 1);
+		if (!event->trigger)
+			die("Failed to allocate event trigger");
 		sprintf(event->trigger, "%s", trigger);
 	}
 }
@@ -3663,7 +4024,9 @@ profile_add_event(struct buffer_instance *instance, const char *event_str, int s
 	}
 
 	if (!event) {
-		event = malloc_or_die(sizeof(*event));
+		event = malloc(sizeof(*event));
+		if (!event)
+			die("Failed to allocate event");
 		memset(event, 0, sizeof(*event));
 		event->event = event_str;
 		add_event(instance, event);
@@ -3680,10 +4043,14 @@ profile_add_event(struct buffer_instance *instance, const char *event_str, int s
 	return 0;
 }
 
+int tracecmd_add_event(const char *event_str, int stack)
+{
+	return profile_add_event(first_instance, event_str, stack);
+}
+
 static void enable_profile(struct buffer_instance *instance)
 {
 	int stacktrace = 0;
-	int ret;
 	int i;
 	char *trigger_events[] = {
 		"sched:sched_switch",
@@ -3705,10 +4072,7 @@ static void enable_profile(struct buffer_instance *instance)
 	if (!instance->plugin) {
 		if (trace_check_file_exists(instance, "max_graph_depth")) {
 			instance->plugin = "function_graph";
-			ret = write_instance_file(instance, "max_graph_depth",
-						  "1", NULL);
-			if (ret < 0)
-				die("could not write to max_graph_depth");
+			set_max_graph_depth(instance, "1");
 		} else
 			warning("Kernel does not support max_graph_depth\n"
 				" Skipping user/kernel profiling");
@@ -3746,10 +4110,14 @@ create_hook_event(struct buffer_instance *instance,
 	len = strlen(event);
 	len += strlen(system) + 2;
 
-	event_name = malloc_or_die(len);
+	event_name = malloc(len);
+	if (!event_name)
+		die("Failed to allocate %s/%s", system, event);
 	sprintf(event_name, "%s:%s", system, event);
 
-	event_list = malloc_or_die(sizeof(*event_list));
+	event_list = malloc(sizeof(*event_list));
+	if (!event_list)
+		die("Failed to allocate event list for %s", event_name);
 	memset(event_list, 0, sizeof(*event_list));
 	event_list->event = event_name;
 	add_event(instance, event_list);
@@ -3789,12 +4157,16 @@ void update_first_instance(struct buffer_instance *instance, int topt)
 }
 
 enum {
-	OPT_bycomm	= 250,
-	OPT_stderr	= 251,
-	OPT_profile	= 252,
-	OPT_nosplice	= 253,
-	OPT_funcstack	= 254,
-	OPT_date	= 255,
+
+	OPT_debug		= 247,
+	OPT_max_graph_depth	= 248,
+	OPT_tsoffset		= 249,
+	OPT_bycomm		= 250,
+	OPT_stderr		= 251,
+	OPT_profile		= 252,
+	OPT_nosplice		= 253,
+	OPT_funcstack		= 254,
+	OPT_date		= 255,
 };
 
 void trace_record (int argc, char **argv)
@@ -3803,7 +4175,7 @@ void trace_record (int argc, char **argv)
 	const char *output = NULL;
 	const char *option;
 	struct event_list *event = NULL;
-	struct event_list *last_event;
+	struct event_list *last_event = NULL;
 	struct buffer_instance *instance = &top_instance;
 	enum trace_type type = 0;
 	char *pids;
@@ -3824,7 +4196,10 @@ void trace_record (int argc, char **argv)
 	int neg_event = 0;
 	int date = 0;
 	int manual = 0;
+	char *max_graph_depth = NULL;
 	int topt = 0;
+	int do_child = 0;
+	int data_flags = 0;
 
 	int c;
 
@@ -3841,8 +4216,8 @@ void trace_record (int argc, char **argv)
 	else if ((stream = strcmp(argv[1], "stream") == 0))
 		; /* do nothing */
 	else if ((profile = strcmp(argv[1], "profile") == 0)) {
+		handle_init = trace_init_profile;
 		events = 1;
-
 	} else if (strcmp(argv[1], "stop") == 0) {
 		for (;;) {
 			int c;
@@ -3856,6 +4231,8 @@ void trace_record (int argc, char **argv)
 				break;
 			case 'B':
 				instance = create_instance(optarg);
+				if (!instance)
+					die("Failed to create instance");
 				add_instance(instance);
 				break;
 			case 'a':
@@ -3872,7 +4249,7 @@ void trace_record (int argc, char **argv)
 
 		}
 		update_first_instance(instance, topt);
-		disable_tracing();
+		tracecmd_disable_tracing();
 		exit(0);
 	} else if (strcmp(argv[1], "restart") == 0) {
 		for (;;) {
@@ -3887,6 +4264,8 @@ void trace_record (int argc, char **argv)
 				break;
 			case 'B':
 				instance = create_instance(optarg);
+				if (!instance)
+					die("Failed to create instance");
 				add_instance(instance);
 				break;
 			case 'a':
@@ -3903,7 +4282,7 @@ void trace_record (int argc, char **argv)
 
 		}
 		update_first_instance(instance, topt);
-		enable_tracing();
+		tracecmd_enable_tracing();
 		exit(0);
 	} else if (strcmp(argv[1], "reset") == 0) {
 		/* if last arg is -a, then -b and -d apply to all instances */
@@ -3934,6 +4313,8 @@ void trace_record (int argc, char **argv)
 			case 'B':
 				last_specified_all = 0;
 				instance = create_instance(optarg);
+				if (!instance)
+					die("Failed to create instance");
 				add_instance(instance);
 				/* -d will remove keep */
 				instance->keep = 1;
@@ -3965,11 +4346,11 @@ void trace_record (int argc, char **argv)
 			}
 		}
 		update_first_instance(instance, topt);
-		disable_all(1);
+		tracecmd_disable_all_tracing(1);
 		set_buffer_size();
 		clear_filters();
 		clear_triggers();
-		remove_instances();
+		tracecmd_remove_instances();
 		clear_func_filters();
 		exit(0);
 	} else
@@ -3985,6 +4366,9 @@ void trace_record (int argc, char **argv)
 			{"profile", no_argument, NULL, OPT_profile},
 			{"stderr", no_argument, NULL, OPT_stderr},
 			{"by-comm", no_argument, NULL, OPT_bycomm},
+			{"ts-offset", required_argument, NULL, OPT_tsoffset},
+			{"max-graph-depth", required_argument, NULL, OPT_max_graph_depth},
+			{"debug", no_argument, NULL, OPT_debug},
 			{"help", no_argument, NULL, '?'},
 			{NULL, 0, NULL, 0}
 		};
@@ -4010,7 +4394,9 @@ void trace_record (int argc, char **argv)
 			break;
 		case 'e':
 			events = 1;
-			event = malloc_or_die(sizeof(*event));
+			event = malloc(sizeof(*event));
+			if (!event)
+				die("Failed to allocate event %s", optarg);
 			memset(event, 0, sizeof(*event));
 			event->event = optarg;
 			add_event(instance, event);
@@ -4035,8 +4421,10 @@ void trace_record (int argc, char **argv)
 				strcat(last_event->filter, ")");
 			} else {
 				last_event->filter =
-					malloc_or_die(strlen(optarg) +
-						      strlen("()") + 1);
+					malloc(strlen(optarg) +
+					       strlen("()") + 1);
+				if (!last_event->filter)
+					die("Failed to allocate filter %s", optarg);
 				sprintf(last_event->filter, "(%s)", optarg);
 			}
 			break;
@@ -4048,27 +4436,35 @@ void trace_record (int argc, char **argv)
 			break;
 
 		case 'F':
+			test_set_event_pid();
 			filter_task = 1;
 			break;
 		case 'G':
 			global = 1;
 			break;
 		case 'P':
+			test_set_event_pid();
 			pids = strdup(optarg);
 			if (!pids)
 				die("strdup");
 			pid = strtok_r(pids, ",", &sav);
 			while (pid) {
-				add_filter_pid(atoi(pid));
+				add_filter_pid(atoi(pid), 0);
 				pid = strtok_r(NULL, ",", &sav);
 			}
 			free(pids);
 			break;
 		case 'c':
+			test_set_event_pid();
+			if (!have_event_fork) {
 #ifdef NO_PTRACE
-			die("-c invalid: ptrace not supported");
+				die("-c invalid: ptrace not supported");
 #endif
-			do_ptrace = 1;
+				do_ptrace = 1;
+			} else {
+				save_option("event-fork");
+				do_child = 1;
+			}
 			break;
 		case 'C':
 			instance->clock = optarg;
@@ -4177,7 +4573,7 @@ void trace_record (int argc, char **argv)
 			max_kb = atoi(optarg);
 			break;
 		case 'M':
-			instance->cpumask = optarg;
+			instance->cpumask = alloc_mask_from_hex(optarg);
 			break;
 		case 't':
 			if (extract)
@@ -4190,6 +4586,8 @@ void trace_record (int argc, char **argv)
 			break;
 		case 'B':
 			instance = create_instance(optarg);
+			if (!instance)
+				die("Failed to create instance");
 			add_instance(instance);
 			if (profile)
 				instance->profile = 1;
@@ -4202,6 +4600,9 @@ void trace_record (int argc, char **argv)
 			break;
 		case OPT_date:
 			date = 1;
+			if (data_flags & DATA_FL_OFFSET)
+				die("Can not use both --date and --ts-offset");
+			data_flags |= DATA_FL_DATE;
 			break;
 		case OPT_funcstack:
 			func_stack = 1;
@@ -4210,6 +4611,7 @@ void trace_record (int argc, char **argv)
 			recorder_flags |= TRACECMD_RECORD_NOSPLICE;
 			break;
 		case OPT_profile:
+			handle_init = trace_init_profile;
 			instance->profile = 1;
 			events = 1;
 			break;
@@ -4224,13 +4626,30 @@ void trace_record (int argc, char **argv)
 		case OPT_bycomm:
 			trace_profile_set_merge_like_comms();
 			break;
+		case OPT_tsoffset:
+			date2ts = strdup(optarg);
+			if (data_flags & DATA_FL_DATE)
+				die("Can not use both --date and --ts-offset");
+			data_flags |= DATA_FL_OFFSET;
+			break;
+		case OPT_max_graph_depth:
+			free(max_graph_depth);
+			max_graph_depth = strdup(optarg);
+			if (!max_graph_depth)
+				die("Could not allocate option");
+			break;
+		case OPT_debug:
+			debug = 1;
+			break;
 		default:
 			usage(argv);
 		}
 	}
 
 	if (do_ptrace && !filter_task && (filter_pid < 0))
-		die(" -c can only be used with -F or -P");
+		die(" -c can only be used with -F (or -P with event-fork support)");
+	if (do_child && !filter_task &&! filter_pid)
+		die(" -c can only be used with -P or -F");
 
 	if ((argc - optind) >= 2) {
 		if (start)
@@ -4295,7 +4714,7 @@ void trace_record (int argc, char **argv)
 
 	if (!extract) {
 		fset = set_ftrace(!disable, total_disable);
-		disable_all(1);
+		tracecmd_disable_all_tracing(1);
 
 		for_all_instances(instance)
 			set_clock(instance);
@@ -4323,14 +4742,19 @@ void trace_record (int argc, char **argv)
 	else if (extract)
 		type = TRACE_TYPE_EXTRACT;
 	else if (profile)
-		/* PROFILE includes the STREAM bit */
-		type = TRACE_TYPE_PROFILE;
+		type = TRACE_TYPE_STREAM;
 	else
 		type = TRACE_TYPE_START;
 
 	update_plugins(type);
 
 	set_options();
+
+	if (max_graph_depth) {
+		for_all_instances(instance)
+			set_max_graph_depth(instance, max_graph_depth);
+		free(max_graph_depth);
+	}
 
 	allocate_seq();
 
@@ -4346,7 +4770,7 @@ void trace_record (int argc, char **argv)
 	} else {
 		if (!(type & (TRACE_TYPE_RECORD | TRACE_TYPE_STREAM))) {
 			update_task_filter();
-			enable_tracing();
+			tracecmd_enable_tracing();
 			exit(0);
 		}
 
@@ -4354,7 +4778,7 @@ void trace_record (int argc, char **argv)
 			run_cmd(type, (argc - optind) - 1, &argv[optind + 1]);
 		else {
 			update_task_filter();
-			enable_tracing();
+			tracecmd_enable_tracing();
 			/* We don't ptrace ourself */
 			if (do_ptrace && filter_pid >= 0)
 				ptrace_attach(filter_pid);
@@ -4364,7 +4788,7 @@ void trace_record (int argc, char **argv)
 				trace_or_sleep(type);
 		}
 
-		disable_tracing();
+		tracecmd_disable_tracing();
 		if (!latency)
 			stop_threads(type);
 	}
@@ -4372,7 +4796,7 @@ void trace_record (int argc, char **argv)
 	record_stats();
 
 	if (!keep)
-		disable_all(0);
+		tracecmd_disable_all_tracing(0);
 
 	/* extract records the date after extraction */
 	if (extract && date) {
@@ -4380,12 +4804,12 @@ void trace_record (int argc, char **argv)
 		 * We need to start tracing, don't let other traces
 		 * screw with our trace_marker.
 		 */
-		disable_all(1);
+		tracecmd_disable_all_tracing(1);
 		date2ts = get_date_to_ts();
 	}
 
 	if (record || extract) {
-		record_data(date2ts);
+		record_data(date2ts, data_flags);
 		delete_thread_data();
 	} else
 		print_stats();
@@ -4402,7 +4826,7 @@ void trace_record (int argc, char **argv)
 
 	set_plugin("nop");
 
-	remove_instances();
+	tracecmd_remove_instances();
 
 	/* If tracing_on was enabled before we started, set it on now */
 	for_all_instances(instance) {

@@ -1,7 +1,7 @@
 # trace-cmd version
 TC_VERSION = 2
 TC_PATCHLEVEL = 3
-TC_EXTRAVERSION = 0
+TC_EXTRAVERSION = 1
 
 # Kernel Shark version
 KS_VERSION = 0
@@ -218,7 +218,7 @@ KERNELSHARK_VERSION = $(KS_VERSION).$(KS_PATCHLEVEL).$(KS_EXTRAVERSION)
 
 INCLUDES = -I. $(CONFIG_INCLUDES)
 
-include features.mk
+include $(src)/features.mk
 
 # Set compile option CFLAGS if not set elsewhere
 CFLAGS ?= -g -Wall

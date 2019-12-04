@@ -1,3 +1,10 @@
+trace-cmd (2.8.3-2) unstable; urgency=medium
+
+  * build should be verbose by default (Closes: #946067)
+  * Add the watch file
+
+ -- Sudip Mukherjee <sudipm.mukherjee@gmail.com>  Wed, 04 Dec 2019 21:32:41 +0000
+
 trace-cmd (2.8.3-1) unstable; urgency=medium
 
   * Update to upstream v2.8.3 and change maintainer (Closes: #943551)

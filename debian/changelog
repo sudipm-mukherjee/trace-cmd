@@ -1,3 +1,9 @@
+trace-cmd (2.8.3-3) unstable; urgency=medium
+
+  * Fix FTCBFS, thanks to Helmut Grohne. (Closes: #946296)
+
+ -- Sudip Mukherjee <sudipm.mukherjee@gmail.com>  Sun, 22 Dec 2019 22:43:33 +0000
+
 trace-cmd (2.8.3-2) unstable; urgency=medium
 
   * build should be verbose by default (Closes: #946067)

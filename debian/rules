@@ -10,7 +10,9 @@ OPTS=DESTDIR=$(DEB_DESTDIR) prefix=/usr VERBOSE=$(if $(filter terse,$(DEB_BUILD_
 override_dh_auto_clean:
 	$(MAKE) clean doc_clean $(OPTS)
 override_dh_auto_build:
-	$(MAKE) all $(OPTS)
+	dh_auto_build -- all $(OPTS)
+	# Run cmake in the way the Makefile would do it, but append our flags.
+	dh_auto_configure --sourcedirectory=kernel-shark --builddirectory=kernel-shark/build -- -D_INSTALL_PREFIX=/usr
 	$(MAKE) gui $(OPTS)
 	$(MAKE) doc $(OPTS)
 override_dh_auto_install:

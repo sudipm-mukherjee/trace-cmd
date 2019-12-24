@@ -1,3 +1,9 @@
+trace-cmd (2.8.3-4) unstable; urgency=medium
+
+  * Add dependency for mipsel
+
+ -- Sudip Mukherjee <sudipm.mukherjee@gmail.com>  Wed, 25 Dec 2019 18:59:32 +0000
+
 trace-cmd (2.8.3-3) unstable; urgency=medium
 
   * Fix FTCBFS, thanks to Helmut Grohne. (Closes: #946296)

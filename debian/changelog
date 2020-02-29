@@ -1,3 +1,12 @@
+trace-cmd (2.8.3-5) unstable; urgency=medium
+
+  * Remove dependency on cdbs.
+  * Update Standards-Version to 4.5.0.
+  * Add a missing build dependency.
+    - kernelshark was unable to capture trace.
+
+ -- Sudip Mukherjee <sudipm.mukherjee@gmail.com>  Sat, 29 Feb 2020 20:02:10 +0000
+
 trace-cmd (2.8.3-4) unstable; urgency=medium
 
   * Add dependency for mipsel

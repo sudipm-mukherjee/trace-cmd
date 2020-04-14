@@ -1,4 +1,4 @@
-Format: http://www.debian.org/doc/packaging-manuals/copyright-format/1.0/
+Format: https://www.debian.org/doc/packaging-manuals/copyright-format/1.0/
 Upstream-Name: trace-cmd
 Upstream-Contact: Steven Rostedt <rostedt@goodmis.org>
 Source: git://git.kernel.org/pub/scm/utils/trace-cmd/trace-cmd.git

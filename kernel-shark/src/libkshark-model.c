@@ -254,20 +254,31 @@ static size_t ksmodel_set_upper_edge(struct kshark_trace_histo *histo)
 static void ksmodel_set_next_bin_edge(struct kshark_trace_histo *histo,
 				      size_t bin, size_t last_row)
 {
-	size_t time, next_bin = bin + 1;
+	uint64_t time_min, time_max;
+	size_t next_bin = bin + 1;
 	ssize_t row;
 
-	/* Calculate the beginning of the next bin. */
-	time = histo->min + next_bin * histo->bin_size;
+	/* Calculate the beginning and the end of the next bin. */
+	time_min = histo->min + next_bin * histo->bin_size;
+	time_max = time_min + histo->bin_size;
+	/*
+	 * The timestamp of the very last entry of the dataset can be exactly
+	 * equal to the value of the upper edge of the range. This is very
+	 * likely to happen when we use ksmodel_set_in_range_bining(). In this
+	 * case we have to increase the size of the very last bin in order to
+	 * make sure that the last entry of the dataset will fall into it.
+	 */
+	if (next_bin == histo->n_bins - 1)
+		++time_max;
 
 	/*
 	 * Find the index of the first entry inside
-	 * the next bin (timestamp > time).
+	 * the next bin (timestamp > time_min).
 	 */
-	row = kshark_find_entry_by_time(time, histo->data, last_row,
+	row = kshark_find_entry_by_time(time_min, histo->data, last_row,
 					histo->data_size - 1);
 
-	if (row < 0 || histo->data[row]->ts >= time + histo->bin_size) {
+	if (row < 0 || histo->data[row]->ts >= time_max) {
 		/* The bin is empty. */
 		histo->map[next_bin] = KS_EMPTY_BIN;
 		return;
@@ -585,9 +596,9 @@ void ksmodel_shift_backward(struct kshark_trace_histo *histo, size_t n)
  * @param histo: Input location for the model descriptor.
  * @param ts: position in time to be visualized.
  */
-void ksmodel_jump_to(struct kshark_trace_histo *histo, size_t ts)
+void ksmodel_jump_to(struct kshark_trace_histo *histo, uint64_t ts)
 {
-	size_t min, max, range_min;
+	uint64_t min, max, range_min;
 
 	if (ts > histo->min && ts < histo->max) {
 		/*
@@ -907,7 +918,7 @@ ksmodel_get_entry_front(struct kshark_trace_histo *histo,
 		return NULL;
 
 	if (col && col->size)
-		entry = kshark_get_collection_entry_front(&req, histo->data,
+		entry = kshark_get_collection_entry_front(req, histo->data,
 							  col, index);
 	else
 		entry = kshark_get_entry_front(req, histo->data, index);
@@ -954,8 +965,8 @@ ksmodel_get_entry_back(struct kshark_trace_histo *histo,
 		return NULL;
 
 	if (col && col->size)
-		entry = kshark_get_collection_entry_back(&req, histo->data,
-							  col, index);
+		entry = kshark_get_collection_entry_back(req, histo->data,
+							 col, index);
 	else
 		entry = kshark_get_entry_back(req, histo->data, index);
 
@@ -1167,7 +1178,7 @@ bool ksmodel_cpu_visible_event_exist(struct kshark_trace_histo *histo,
 	req->vis_mask = KS_EVENT_VIEW_FILTER_MASK;
 
 	if (col && col->size)
-		entry = kshark_get_collection_entry_front(&req, histo->data,
+		entry = kshark_get_collection_entry_front(req, histo->data,
 							  col, index);
 	else
 		entry = kshark_get_entry_front(req, histo->data, index);
@@ -1220,7 +1231,7 @@ bool ksmodel_task_visible_event_exist(struct kshark_trace_histo *histo,
 	req->vis_mask = KS_EVENT_VIEW_FILTER_MASK;
 
 	if (col && col->size)
-		entry = kshark_get_collection_entry_front(&req, histo->data,
+		entry = kshark_get_collection_entry_front(req, histo->data,
 							  col, index);
 	else
 		entry = kshark_get_entry_front(req, histo->data, index);

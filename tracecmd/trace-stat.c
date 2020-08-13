@@ -13,6 +13,7 @@
 #include <fcntl.h>
 #include <ctype.h>
 
+#include "tracefs.h"
 #include "trace-local.h"
 
 #ifndef BUFSIZ
@@ -30,9 +31,9 @@ static int get_instance_file_fd(struct buffer_instance *instance,
 	char *path;
 	int fd;
 
-	path = get_instance_file(instance, file);
+	path = tracefs_instance_get_file(instance->tracefs, file);
 	fd = open(path, O_RDONLY);
-	tracecmd_put_tracing_file(path);
+	tracefs_put_tracing_file(path);
 
 	return fd;
 }
@@ -121,24 +122,66 @@ static char *get_instance_file_content(struct buffer_instance *instance,
 	return str;
 }
 
-static void report_plugin(struct buffer_instance *instance)
+static void report_file(struct buffer_instance *instance,
+			char *name, char *def_value, char *description)
 {
 	char *str;
 	char *cont;
 
-	str = get_instance_file_content(instance, "current_tracer");
+	if (!tracefs_file_exists(instance->tracefs, name))
+		return;
+	str = get_instance_file_content(instance, name);
 	if (!str)
 		return;
-
 	cont = strstrip(str);
+	if (cont[0] && strcmp(cont, def_value) != 0)
+		printf("\n%s%s\n", description, cont);
 
-	/* We only care if the plugin is something other than nop */
-	if (strcmp(cont, "nop") == 0)
+	free(str);
+}
+
+static void report_instances(void)
+{
+	struct dirent *dent;
+	bool first = true;
+	char *path = NULL;
+	DIR *dir = NULL;
+	struct stat st;
+	int ret;
+
+	path = tracefs_get_tracing_file("instances");
+	if (!path)
+		return;
+	ret = stat(path, &st);
+	if (ret < 0 || !S_ISDIR(st.st_mode))
 		goto out;
 
-	printf("\nTracer: %s\n", cont);
- out:
-	free(str);
+	dir = opendir(path);
+	if (!dir)
+		goto out;
+
+	while ((dent = readdir(dir))) {
+		char *instance;
+
+		if (strcmp(dent->d_name, ".") == 0 ||
+		    strcmp(dent->d_name, "..") == 0)
+			continue;
+		instance = append_file(path, dent->d_name);
+		ret = stat(instance, &st);
+		free(instance);
+		if (ret < 0 || !S_ISDIR(st.st_mode))
+			continue;
+		if (first) {
+			first = false;
+			printf("\nInstances:\n");
+		}
+		printf(" %s\n", dent->d_name);
+	}
+
+out:
+	if (dir)
+		closedir(dir);
+	tracefs_put_tracing_file(path);
 }
 
 struct event_iter *trace_event_iter_alloc(const char *path)
@@ -347,7 +390,7 @@ static void report_events(struct buffer_instance *instance)
 
 	free(str);
 
-	path = get_instance_file(instance, "events");
+	path = tracefs_instance_get_file(instance->tracefs, "events");
 	if (!path)
 		die("malloc");
 
@@ -383,7 +426,7 @@ static void report_events(struct buffer_instance *instance)
 	if (!processed && !processed_part)
 		printf("  (none enabled)\n");
 
-	tracecmd_put_tracing_file(path);
+	tracefs_put_tracing_file(path);
 }
 
 static void
@@ -436,7 +479,7 @@ static void report_event_filters(struct buffer_instance *instance)
 	enum event_iter_type type;
 	enum event_process processed = PROCESSED_NONE;
 
-	path = get_instance_file(instance, "events");
+	path = tracefs_instance_get_file(instance->tracefs, "events");
 	if (!path)
 		die("malloc");
 
@@ -456,7 +499,7 @@ static void report_event_filters(struct buffer_instance *instance)
 
 	trace_event_iter_free(iter);
 
-	tracecmd_put_tracing_file(path);
+	tracefs_put_tracing_file(path);
 }
 
 static void
@@ -509,7 +552,7 @@ static void report_event_triggers(struct buffer_instance *instance)
 	enum event_iter_type type;
 	enum event_process processed = PROCESSED_NONE;
 
-	path = get_instance_file(instance, "events");
+	path = tracefs_instance_get_file(instance->tracefs, "events");
 	if (!path)
 		die("malloc");
 
@@ -529,7 +572,7 @@ static void report_event_triggers(struct buffer_instance *instance)
 
 	trace_event_iter_free(iter);
 
-	tracecmd_put_tracing_file(path);
+	tracefs_put_tracing_file(path);
 }
 
 enum func_states {
@@ -598,42 +641,42 @@ static void report_graph_funcs(struct buffer_instance *instance)
 {
 	char *path;
 
-	path = get_instance_file(instance, "set_graph_function");
+	path = tracefs_instance_get_file(instance->tracefs, "set_graph_function");
 	if (!path)
 		die("malloc");
 
 	list_functions(path, "Function Graph Filter");
 	
-	tracecmd_put_tracing_file(path);
+	tracefs_put_tracing_file(path);
 
-	path = get_instance_file(instance, "set_graph_notrace");
+	path = tracefs_instance_get_file(instance->tracefs, "set_graph_notrace");
 	if (!path)
 		die("malloc");
 
 	list_functions(path, "Function Graph No Trace");
 	
-	tracecmd_put_tracing_file(path);
+	tracefs_put_tracing_file(path);
 }
 
 static void report_ftrace_filters(struct buffer_instance *instance)
 {
 	char *path;
 
-	path = get_instance_file(instance, "set_ftrace_filter");
+	path = tracefs_instance_get_file(instance->tracefs, "set_ftrace_filter");
 	if (!path)
 		die("malloc");
 
 	list_functions(path, "Function Filter");
 	
-	tracecmd_put_tracing_file(path);
+	tracefs_put_tracing_file(path);
 
-	path = get_instance_file(instance, "set_ftrace_notrace");
+	path = tracefs_instance_get_file(instance->tracefs, "set_ftrace_notrace");
 	if (!path)
 		die("malloc");
 
 	list_functions(path, "Function No Trace");
 	
-	tracecmd_put_tracing_file(path);
+	tracefs_put_tracing_file(path);
 }
 
 static void report_buffers(struct buffer_instance *instance)
@@ -737,7 +780,7 @@ static void report_cpumask(struct buffer_instance *instance)
 	cont = strstrip(str);
 
 	/* check to make sure all CPUs on this machine are set */
-	cpus = count_cpus();
+	cpus = tracecmd_count_cpus();
 
 	for (i = strlen(cont) - 1; i >= 0 && cpus > 0; i--) {
 		if (cont[i] == ',')
@@ -768,23 +811,6 @@ static void report_cpumask(struct buffer_instance *instance)
 	/* If cpus is greater than zero, one isn't set */
 	if (cpus > 0)
 		printf("\nCPU mask: %s\n", cont);
-
-	free(str);
-}
-
-static void report_latency(struct buffer_instance *instance)
-{
-	char *str;
-	char *cont;
-
-	str = get_instance_file_content(instance, "tracing_max_latency");
-	if (!str)
-		return;
-
-	cont = strstrip(str);
-
-	if (strcmp(cont, "0") != 0)
-		printf("\nMax Latency: %s\n", cont);
 
 	free(str);
 }
@@ -857,10 +883,11 @@ static void stat_instance(struct buffer_instance *instance)
 	if (instance != &top_instance) {
 		if (instance != first_instance)
 			printf("---------------\n");
-		printf("Instance: %s\n", instance->name);
+		printf("Instance: %s\n",
+			tracefs_instance_get_name(instance->tracefs));
 	}
 
-	report_plugin(instance);
+	report_file(instance, "current_tracer", "nop", "Tracer: ");
 	report_events(instance);
 	report_event_filters(instance);
 	report_event_triggers(instance);
@@ -869,10 +896,16 @@ static void stat_instance(struct buffer_instance *instance)
 	report_buffers(instance);
 	report_clock(instance);
 	report_cpumask(instance);
-	report_latency(instance);
+	report_file(instance, "tracing_max_latency", "0", "Max Latency: ");
 	report_kprobes(instance);
 	report_uprobes(instance);
+	report_file(instance, "set_event_pid", "", "Filtered event PIDs:\n");
+	report_file(instance, "set_ftrace_pid", "no pid",
+		    "Filtered function tracer PIDs:\n");
 	report_traceon(instance);
+	report_file(instance, "error_log", "", "Error log:\n");
+	if (instance == &top_instance)
+		report_instances();
 }
 
 void trace_stat (int argc, char **argv)
@@ -881,6 +914,8 @@ void trace_stat (int argc, char **argv)
 	int topt = 0;
 	int status;
 	int c;
+
+	init_top_instance();
 
 	for (;;) {
 		c = getopt(argc-1, argv+1, "tB:");
@@ -894,7 +929,7 @@ void trace_stat (int argc, char **argv)
 			instance = create_instance(optarg);
 			if (!instance)
 				die("Failed to create instance");
-			add_instance(instance, count_cpus());
+			add_instance(instance, tracecmd_count_cpus());
 			/* top instance requires direct access */
 			if (!topt && is_top_instance(first_instance))
 				first_instance = instance;

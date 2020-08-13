@@ -35,6 +35,7 @@ enum {
  * @next		- offset from @data to the start of next event
  * @size		- The size of data on @data
  * @start		- The offset from @subbuffer where @data lives
+ * @first		- The offset from @subbuffer where the first non time stamp event lives
  *
  * @read_4		- Function to read 4 raw bytes (may swap)
  * @read_8		- Function to read 8 raw bytes (may swap)
@@ -51,6 +52,7 @@ struct kbuffer {
 	unsigned int		next;
 	unsigned int		size;
 	unsigned int		start;
+	unsigned int		first;
 
 	unsigned int (*read_4)(void *ptr);
 	unsigned long long (*read_8)(void *ptr);
@@ -361,6 +363,7 @@ translate_data(struct kbuffer *kbuf, void *data, void **rptr,
 		break;
 
 	case KBUFFER_TYPE_TIME_EXTEND:
+	case KBUFFER_TYPE_TIME_STAMP:
 		extend = read_4(kbuf, data);
 		data += 4;
 		extend <<= TS_SHIFT;
@@ -369,10 +372,6 @@ translate_data(struct kbuffer *kbuf, void *data, void **rptr,
 		*length = 0;
 		break;
 
-	case KBUFFER_TYPE_TIME_STAMP:
-		data += 12;
-		*length = 0;
-		break;
 	case 0:
 		*length = read_4(kbuf, data) - 4;
 		*length = (*length + 3) & ~3;
@@ -397,7 +396,11 @@ static unsigned int update_pointers(struct kbuffer *kbuf)
 
 	type_len = translate_data(kbuf, ptr, &ptr, &delta, &length);
 
-	kbuf->timestamp += delta;
+	if (type_len == KBUFFER_TYPE_TIME_STAMP)
+		kbuf->timestamp = delta;
+	else
+		kbuf->timestamp += delta;
+
 	kbuf->index = calc_index(kbuf, ptr);
 	kbuf->next = kbuf->index + length;
 
@@ -438,7 +441,7 @@ void *kbuffer_translate_data(int swap, void *data, unsigned int *size)
 	case KBUFFER_TYPE_TIME_EXTEND:
 	case KBUFFER_TYPE_TIME_STAMP:
 		return NULL;
-	};
+	}
 
 	*size = length;
 
@@ -454,7 +457,9 @@ static int __next_event(struct kbuffer *kbuf)
 		if (kbuf->next >= kbuf->size)
 			return -1;
 		type = update_pointers(kbuf);
-	} while (type == KBUFFER_TYPE_TIME_EXTEND || type == KBUFFER_TYPE_PADDING);
+	} while (type == KBUFFER_TYPE_TIME_EXTEND ||
+		 type == KBUFFER_TYPE_TIME_STAMP ||
+		 type == KBUFFER_TYPE_PADDING);
 
 	return 0;
 }
@@ -542,6 +547,9 @@ int kbuffer_load_subbuffer(struct kbuffer *kbuf, void *subbuffer)
 	kbuf->next = 0;
 
 	next_event(kbuf);
+
+	/* save the first record from the page */
+	kbuf->first = kbuf->curr;
 
 	return 0;
 }
@@ -752,7 +760,7 @@ void kbuffer_set_old_format(struct kbuffer *kbuf)
  */
 int kbuffer_start_of_data(struct kbuffer *kbuf)
 {
-	return kbuf->start;
+	return kbuf->first + kbuf->start;
 }
 
 /**

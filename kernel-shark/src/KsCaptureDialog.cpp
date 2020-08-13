@@ -18,9 +18,34 @@
 #include "KsCmakeDef.hpp"
 #include "KsCaptureDialog.hpp"
 
+extern "C" {
+  // To get access to geteuid()
+  #include <unistd.h>
+  #include <sys/types.h>
+}
+
 static inline tep_handle *local_events()
 {
-	return tracecmd_local_events(tracecmd_get_tracing_dir());
+	return tracefs_local_events(tracefs_get_tracing_dir());
+}
+
+/**
+ * @brief Create KsCommandLineEdit.
+ *
+ * @param text: Defaulst text to be shown.
+ * @param parent: The parent of this widget.
+ */
+KsCommandLineEdit::KsCommandLineEdit(QString text, QWidget *parent)
+: QPlainTextEdit(text, parent) {}
+
+QSize KsCommandLineEdit::minimumSizeHint() const
+{
+	return {FONT_WIDTH * 30, FONT_HEIGHT * 2};
+}
+
+QSize KsCommandLineEdit::sizeHint() const
+{
+	return {FONT_WIDTH * 30, FONT_HEIGHT * 3};
 }
 
 /** @brief Create KsCaptureControl widget. */
@@ -55,19 +80,30 @@ KsCaptureControl::KsCaptureControl(QWidget *parent)
 		_topLayout.addWidget(line);
 	};
 
-	if (pluginList.count() == 0) {
+	if (pluginList.count() == 0 || !_localTEP) {
 		/*
-		 * No plugins have been found. Most likely this is because
-		 * the process has no Root privileges.
+		 * No plugins or events have been found. Most likely this is
+		 * because the process has no Root privileges or because
+		 * tracefs cannot be mounted.
 		 */
 		QString message("Error: No events or plugins found.\n");
-		message += "Root privileges are required.";
+
+		if (!_localTEP)
+			message += "Cannot find or mount tracing directory.\n";
+
+		// geteuid() returns 0 if running as effective id of root
+		if (!pluginList.count() && geteuid())
+			message += "Root privileges are required.\n";
+
 		QLabel *errorLabel = new QLabel(message);
 
 		errorLabel->setStyleSheet("QLabel {color : red;}");
 		_topLayout.addWidget(errorLabel);
 
 		lamAddLine();
+
+		/* Disable "Capture" buttons. */
+		_captureButton.setDisabled(true);
 	}
 
 	pluginList.prepend("nop");
@@ -100,7 +136,11 @@ KsCaptureControl::KsCaptureControl(QWidget *parent)
 	_commandLabel.adjustSize();
 	_commandLabel.setFixedWidth(_outputLabel.width());
 	_execLayout.addWidget(&_commandLabel, row, 0);
+
 	_commandLineEdit.setFixedWidth(FONT_WIDTH * 30);
+	_commandLineEdit.setMinimumHeight(FONT_HEIGHT * 2);
+	_commandLineEdit.setMaximumHeight(FONT_HEIGHT * 9);
+
 	_execLayout.addWidget(&_commandLineEdit, row, 1);
 	_commandCheckBox.setCheckState(Qt::Unchecked);
 	_commandCheckBox.adjustSize();
@@ -143,26 +183,18 @@ QStringList KsCaptureControl::getArgs()
 	QStringList argv;
 
 	argv << "record";
-	argv << "-p" << _pluginsComboBox.currentText();
 
-	if (_eventsWidget.all()) {
+	if (_pluginsComboBox.currentText() != "nop")
+		argv << "-p" << _pluginsComboBox.currentText();
+
+	if (_eventsWidget.all())
 		argv << "-e" << "all";
-	} else {
-		QVector<int> evtIds = _eventsWidget.getCheckedIds();
-		tep_event *event;
-
-		for (auto const &id: evtIds) {
-			event = tep_find_event(_localTEP, id);
-			if (!event)
-				continue;
-
-			argv << "-e" + QString(event->system) +
-				":" + QString(event->name);
-		}
-	}
+	else
+		argv << _eventsWidget.getCheckedEvents(true);
 
 	argv << "-o" << outputFileName();
-	argv << _commandLineEdit.text().split(" ");
+
+	argv << KsUtils::splitArguments(_commandLineEdit.toPlainText());
 
 	return argv;
 }
@@ -172,7 +204,7 @@ QStringList KsCaptureControl::_getPlugins()
 	QStringList pluginList;
 	char **all_plugins;
 
-	all_plugins = tracecmd_local_plugins(tracecmd_get_tracing_dir());
+	all_plugins = tracefs_tracers(tracefs_get_tracing_dir());
 
 	if (!all_plugins)
 		return pluginList;
@@ -194,42 +226,58 @@ QStringList KsCaptureControl::_getPlugins()
 
 void KsCaptureControl::_importSettings()
 {
-	int nEvts = tep_get_events_count(_localTEP);
+	int nEvts = tep_get_events_count(_localTEP), nIds;
 	kshark_config_doc *conf, *jevents, *temp;
 	QVector<bool> v(nEvts, false);
 	tracecmd_filter_id *eventHash;
-	tep_event **events;
+	QVector<int> eventIds;
 	QString fileName;
 
+	auto lamImportError = [this] () {
+		emit print("ERROR: Unable to load the configuration file.\n");
+	};
 
 	/** Get all available events. */
-	events = tep_list_events(_localTEP, TEP_EVENT_SORT_SYSTEM);
+	eventIds = KsUtils::getEventIdList(TEP_EVENT_SORT_SYSTEM);
 
 	/* Get the configuration document. */
 	fileName = KsUtils::getFile(this, "Import from Filter",
 				    "Kernel Shark Config files (*.json);;",
 				    _lastFilePath);
 
-	if (fileName.isEmpty())
+	if (fileName.isEmpty()) {
+		lamImportError();
 		return;
+	}
 
 	conf = kshark_open_config_file(fileName.toStdString().c_str(),
 				       "kshark.config.record");
-	if (!conf)
+	if (!conf) {
+		lamImportError();
 		return;
+	}
 
 	/*
 	 * Load the hash table of selected events from the configuration
 	 * document.
 	 */
 	jevents = kshark_config_alloc(KS_CONFIG_JSON);
-	if (!kshark_config_doc_get(conf, "Events", jevents))
+	if (!kshark_config_doc_get(conf, "Events", jevents)) {
+		lamImportError();
 		return;
+	}
 
 	eventHash = tracecmd_filter_id_hash_alloc();
-	kshark_import_event_filter(_localTEP, eventHash, "Events", jevents);
+	nIds = kshark_import_event_filter(_localTEP, eventHash, "Events", jevents);
+	if (nIds < 0) {
+		QString err("WARNING: ");
+		err += "Some of the imported events are not available on this system.\n";
+		err += "All missing events are ignored.\n";
+		emit print(err);
+	}
+
 	for (int i = 0; i < nEvts; ++i) {
-		if (tracecmd_filter_id_find(eventHash, events[i]->id))
+		if (tracecmd_filter_id_find(eventHash, eventIds[i]))
 			v[i] = true;
 	}
 
@@ -239,14 +287,25 @@ void KsCaptureControl::_importSettings()
 	/** Get all available plugins. */
 	temp = kshark_string_config_alloc();
 
-	if (kshark_config_doc_get(conf, "Plugin", temp))
-		_pluginsComboBox.setCurrentText(KS_C_STR_CAST(temp->conf_doc));
+	if (kshark_config_doc_get(conf, "Plugin", temp)) {
+		const char *plugin = KS_C_STR_CAST(temp->conf_doc);
+		int pluginIndex = _pluginsComboBox.findText(plugin);
+
+		if (pluginIndex >= 0) {
+			_pluginsComboBox.setCurrentText(KS_C_STR_CAST(temp->conf_doc));
+		} else {
+			QString err("WARNING: The traceer plugin \"");
+			err += plugin;
+			err += "\" is not available on this machine\n";
+			emit print(err);
+		}
+	}
 
 	if (kshark_config_doc_get(conf, "Output", temp))
 		_outputLineEdit.setText(KS_C_STR_CAST(temp->conf_doc));
 
 	if (kshark_config_doc_get(conf, "Command", temp))
-		_commandLineEdit.setText(KS_C_STR_CAST(temp->conf_doc));
+		_commandLineEdit.setPlainText(KS_C_STR_CAST(temp->conf_doc));
 }
 
 void KsCaptureControl::_exportSettings()
@@ -294,7 +353,7 @@ void KsCaptureControl::_exportSettings()
 	kshark_config_doc_add(conf, "Output", kshark_json_to_conf(jout));
 
 	/* Save the command. */
-	comm = _commandLineEdit.text();
+	comm = _commandLineEdit.toPlainText();
 	json_object *jcomm = json_object_new_string(comm.toStdString().c_str());
 	kshark_config_doc_add(conf, "Command", kshark_json_to_conf(jcomm));
 
@@ -315,7 +374,10 @@ void KsCaptureControl::_browse()
 
 void KsCaptureControl::_apply()
 {
-	emit argsReady(getArgs().join(" "));
+	QStringList argv = getArgs();
+
+	if (argv.count())
+		emit argsReady(argv.join(" "));
 }
 
 /** @brief Create KsCaptureMonitor widget. */
@@ -436,6 +498,9 @@ void KsCaptureMonitor::connectMe(QProcess *proc, KsCaptureControl *ctrl)
 
 	connect(ctrl,	&KsCaptureControl::argsReady,
 		this,	&KsCaptureMonitor::_argsReady);
+
+	connect(ctrl,	&KsCaptureControl::print,
+		this,	&KsCaptureMonitor::print);
 }
 
 void KsCaptureMonitor::_captureStarted()
@@ -489,12 +554,11 @@ KsCaptureDialog::KsCaptureDialog(QWidget *parent)
 	connect(&_captureCtrl._closeButton,	&QPushButton::pressed,
 		this,				&KsCaptureDialog::close);
 
-	if (KsUtils::isInstalled())
-		captureExe = QString(_INSTALL_PREFIX) + QString("/bin");
+	if (!KsUtils::isInstalled())
+		captureExe = QString(_INSTALL_PREFIX) + QString("/bin/trace-cmd");
 	else
-		captureExe = TRACECMD_BIN_DIR;
+		captureExe = TRACECMD_EXECUTABLE;
 
-	captureExe += "/trace-cmd";
 	_captureProc.setProgram(captureExe);
 
 	_captureMon.connectMe(&_captureProc, &_captureCtrl);
@@ -506,7 +570,7 @@ void KsCaptureDialog::_capture()
 	int argc;
 
 	if(_captureMon._argsModified) {
-		argv = _captureMon.text().split(" ");
+		argv = KsUtils::splitArguments(_captureMon.text());
 	} else {
 		argv = _captureCtrl.getArgs();
 	}
@@ -517,6 +581,17 @@ void KsCaptureDialog::_capture()
 	_captureProc.start();
 	_captureProc.waitForFinished();
 
+	/* Reset the _argsModified flag. */
+	_captureMon._argsModified = false;
+
+	if (_captureProc.exitCode() != 0 ||
+	    _captureProc.exitStatus() != QProcess::NormalExit)
+		return;
+
+	/*
+	 * Capture finished successfully. Open the produced tracing data file
+	 * in KernelShark.
+	 */
 	argc = argv.count();
 	for (int i = 0; i < argc; ++i) {
 		if (argv[i] == "-o") {
@@ -524,9 +599,6 @@ void KsCaptureDialog::_capture()
 			break;
 		}
 	}
-
-	/* Reset the _argsModified flag. */
-	_captureMon._argsModified = false;
 }
 
 void KsCaptureDialog::_setChannelMode(int state)
@@ -540,8 +612,9 @@ void KsCaptureDialog::_setChannelMode(int state)
 
 void KsCaptureDialog::_sendOpenReq(const QString &fileName)
 {
-	QLocalSocket *socket = new QLocalSocket(this);
+	QLocalSocket *socket;
 
+	socket = new QLocalSocket(this);
 	socket->connectToServer("KSCapture", QIODevice::WriteOnly);
 	if (socket->waitForConnected()) {
 		QByteArray block;
@@ -555,6 +628,9 @@ void KsCaptureDialog::_sendOpenReq(const QString &fileName)
 		socket->flush();
 		socket->disconnectFromServer();
 	} else {
-		_captureMon.print(socket->errorString());
+		QString error(socket->errorString());
+
+		error += "\n(maybe KernelShark GUI is not open)";
+		_captureMon.print(error);
 	}
 }

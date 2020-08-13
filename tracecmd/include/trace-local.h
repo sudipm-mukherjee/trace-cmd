@@ -12,8 +12,13 @@
 #include "trace-cmd.h"
 #include "event-utils.h"
 
-extern int debug;
-extern int quiet;
+#define TRACE_AGENT_DEFAULT_PORT	823
+
+#define DEFAULT_INPUT_FILE	"trace.dat"
+#define GUEST_PIPE_NAME		"trace-pipe-cpu"
+#define GUEST_DIR_FMT		"/var/lib/trace-cmd/virt/%s"
+#define GUEST_FIFO_FMT		GUEST_DIR_FMT "/" GUEST_PIPE_NAME "%d"
+#define VIRTIO_FIFO_FMT		"/dev/virtio-ports/" GUEST_PIPE_NAME "%d"
 
 /* fix stupid glib guint64 typecasts and printf formats */
 typedef unsigned long long u64;
@@ -52,6 +57,8 @@ void trace_reset(int argc, char **argv);
 
 void trace_start(int argc, char **argv);
 
+void trace_set(int argc, char **argv);
+
 void trace_extract(int argc, char **argv);
 
 void trace_stream(int argc, char **argv);
@@ -63,6 +70,10 @@ void trace_report(int argc, char **argv);
 void trace_split(int argc, char **argv);
 
 void trace_listen(int argc, char **argv);
+
+void trace_agent(int argc, char **argv);
+
+void trace_setup_guest(int argc, char **argv);
 
 void trace_restore(int argc, char **argv);
 
@@ -87,6 +98,13 @@ void trace_show(int argc, char **argv);
 void trace_list(int argc, char **argv);
 
 void trace_usage(int argc, char **argv);
+
+void trace_dump(int argc, char **argv);
+
+int trace_record_agent(struct tracecmd_msg_handle *msg_handle,
+		       int cpus, int *fds,
+		       int argc, char **argv, bool use_fifos,
+		       unsigned long long trace_id);
 
 struct hook_list;
 
@@ -149,6 +167,9 @@ char *strstrip(char *str);
 enum buffer_instance_flags {
 	BUFFER_FL_KEEP		= 1 << 0,
 	BUFFER_FL_PROFILE	= 1 << 1,
+	BUFFER_FL_GUEST		= 1 << 2,
+	BUFFER_FL_AGENT		= 1 << 3,
+	BUFFER_FL_HAS_CLOCK	= 1 << 4,
 };
 
 struct func_list {
@@ -157,12 +178,34 @@ struct func_list {
 	const char *mod;
 };
 
+struct pid_addr_maps {
+	struct pid_addr_maps		*next;
+	struct tracecmd_proc_addr_map	*lib_maps;
+	unsigned int			nr_lib_maps;
+	char				*proc_name;
+	int				pid;
+};
+
+struct opt_list {
+	struct opt_list *next;
+	const char	*option;
+};
+
+struct filter_pids {
+	struct filter_pids *next;
+	int pid;
+	int exclude;
+};
+
 struct buffer_instance {
 	struct buffer_instance	*next;
-	const char		*name;
+	struct tracefs_instance	*tracefs;
+	unsigned long long	trace_id;
 	char			*cpumask;
+	char			*output_file;
 	struct event_list	*events;
 	struct event_list	**event_next;
+	bool			delete;
 
 	struct event_list	*sched_switch_event;
 	struct event_list	*sched_wakeup_event;
@@ -173,7 +216,22 @@ struct buffer_instance {
 	struct func_list	*filter_funcs;
 	struct func_list	*notrace_funcs;
 
+	struct opt_list		*options;
+	struct filter_pids	*filter_pids;
+	struct filter_pids	*process_pids;
+	char			*common_pid_filter;
+	int			nr_filter_pids;
+	int			len_filter_pids;
+	int			nr_process_pids;
+	bool			ptrace_child;
+
+	int			have_set_event_pid;
+	int			have_event_fork;
+	int			have_func_fork;
+	int			get_procmap;
+
 	const char		*clock;
+	unsigned int		*client_ports;
 
 	struct trace_seq	*s_save;
 	struct trace_seq	*s_print;
@@ -183,6 +241,8 @@ struct buffer_instance {
 	struct tracecmd_msg_handle *msg_handle;
 	struct tracecmd_output *network_handle;
 
+	struct pid_addr_maps	*pid_maps;
+
 	char			*max_graph_depth;
 
 	int			flags;
@@ -190,7 +250,21 @@ struct buffer_instance {
 	int			tracing_on_fd;
 	int			buffer_size;
 	int			cpu_count;
+
+	int			argc;
+	char			**argv;
+
+	unsigned int		cid;
+	unsigned int		port;
+	int			*fds;
+	bool			use_fifos;
+
+	pthread_t		tsync_thread;
+	bool			tsync_thread_running;
+	struct tracecmd_time_sync tsync;
 };
+
+void init_top_instance(void);
 
 extern struct buffer_instance top_instance;
 extern struct buffer_instance *buffer_instances;
@@ -200,14 +274,39 @@ extern struct buffer_instance *first_instance;
 #define for_all_instances(i) for (i = first_instance; i; \
 				  i = i == &top_instance ? buffer_instances : (i)->next)
 
+#define is_agent(instance)	((instance)->flags & BUFFER_FL_AGENT)
+#define is_guest(instance)	((instance)->flags & BUFFER_FL_GUEST)
+
 struct buffer_instance *create_instance(const char *name);
 void add_instance(struct buffer_instance *instance, int cpu_count);
-char *get_instance_file(struct buffer_instance *instance, const char *file);
 void update_first_instance(struct buffer_instance *instance, int topt);
 
 void show_instance_file(struct buffer_instance *instance, const char *name);
 
-int count_cpus(void);
+int get_guest_vcpu_pid(unsigned int guest_cid, unsigned int guest_vcpu);
+
+/* moved from trace-cmd.h */
+void tracecmd_create_top_instance(char *name);
+void tracecmd_remove_instances(void);
+int tracecmd_add_event(const char *event_str, int stack);
+void tracecmd_enable_events(void);
+void tracecmd_disable_all_tracing(int disable_tracer);
+void tracecmd_disable_tracing(void);
+void tracecmd_enable_tracing(void);
+void tracecmd_stat_cpu(struct trace_seq *s, int cpu);
+
+int tracecmd_host_tsync(struct buffer_instance *instance,
+			 unsigned int tsync_port);
+void tracecmd_host_tsync_complete(struct buffer_instance *instance);
+unsigned int tracecmd_guest_tsync(char *tsync_protos,
+				  unsigned int tsync_protos_size, char *clock,
+				  unsigned int *tsync_port, pthread_t *thr_id);
+
+int trace_make_vsock(unsigned int port);
+int trace_get_vsock_port(int sd, unsigned int *port);
+int trace_open_vsock(unsigned int cid, unsigned int port);
+
+char *trace_get_guest_file(const char *file, const char *guest);
 
 /* No longer in event-utils.h */
 void __noreturn die(const char *fmt, ...); /* Can be overriden */

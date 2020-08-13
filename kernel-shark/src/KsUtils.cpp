@@ -15,6 +15,22 @@
 
 namespace KsUtils {
 
+/** @brief Get a sorted vector of CPU Ids. */
+QVector<int> getCPUList()
+{
+	kshark_context *kshark_ctx(nullptr);
+	int nCPUs;
+
+	if (!kshark_instance(&kshark_ctx))
+		return {};
+
+	nCPUs = tep_get_cpus(kshark_ctx->pevent);
+	QVector<int> allCPUs = QVector<int>(nCPUs);
+	std::iota(allCPUs.begin(), allCPUs.end(), 0);
+
+	return allCPUs;
+}
+
 /** @brief Get a sorted vector of Task's Pids. */
 QVector<int> getPidList()
 {
@@ -35,6 +51,28 @@ QVector<int> getPidList()
 	qSort(pids);
 
 	return pids;
+}
+
+/**
+ * @brief Get a sorted vector of Event Ids.
+ */
+QVector<int> getEventIdList(tep_event_sort_type sortType)
+{
+	kshark_context *kshark_ctx(nullptr);
+	tep_event **events;
+	int nEvts;
+
+	if (!kshark_instance(&kshark_ctx))
+		return {};
+
+	nEvts = tep_get_events_count(kshark_ctx->pevent);
+	events = tep_list_events(kshark_ctx->pevent, sortType);
+
+	QVector<int> allEvts(nEvts);
+	for (int i = 0; i < nEvts; ++i)
+		allEvts[i] = events[i]->id;
+
+	return allEvts;
 }
 
 /** @brief Get a sorted vector of Id values of a filter. */
@@ -255,6 +293,71 @@ QString getSaveFile(QWidget *parent,
 	}
 
 	return fileName;
+}
+
+/**
+ * Separate the command line arguments inside the string taking into account
+ * possible shell quoting and new lines.
+ */
+QStringList splitArguments(QString cmd)
+{
+	QString::SplitBehavior opt = QString::SkipEmptyParts;
+	int i, progress = 0, size;
+	QStringList argv;
+	QChar quote = 0;
+
+	/* Remove all new lines. */
+	cmd.replace("\\\n", " ");
+
+	size = cmd.count();
+	auto lamMid = [&] () {return cmd.mid(progress, i - progress);};
+	for (i = 0; i < size; ++i) {
+		if (cmd[i] == '\\') {
+			cmd.remove(i, 1);
+			size --;
+			continue;
+		}
+
+		if (cmd[i] == '\'' || cmd[i] == '"') {
+			if (quote.isNull()) {
+				argv << lamMid().split(" ", opt);
+				quote = cmd[i++];
+				progress = i;
+			} else if (quote == cmd[i]) {
+				argv << lamMid();
+				quote = 0;
+				progress = ++i;
+			}
+		}
+	}
+
+	argv << cmd.right(size - progress).split(" ", opt);
+
+	return argv;
+}
+
+/** Parse a string containing Ids. The string can be of the form "1 4-7 9". */
+QVector<int> parseIdList(QString v_str)
+{
+	QStringList list = v_str.split(",", QString::SkipEmptyParts);
+	QVector<int> v;
+
+	for (auto item: list) {
+		int i = item.indexOf('-');
+		if (i > 0) {
+			/* This item is an interval. */
+			int to = item.right(item.size() - i - 1).toInt();
+			int from = item.left(i).toInt();
+			int s = v.size();
+
+			v.resize(s + to - from + 1);
+			std::iota(v.begin() + s, v.end(), from);
+		} else {
+			v.append(item.toInt());
+		}
+	}
+
+	return v;
 }
 
 }; // KsUtils

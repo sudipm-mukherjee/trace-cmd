@@ -119,6 +119,9 @@ OPTIONS
      Used with either *-F* (or *-P* if kernel supports it) to trace the process'
      children too.
 
+*--user*::
+     Execute the specified *command* as given user.
+
 *-C* 'clock'::
      Set the trace clock to "clock".
 
@@ -277,6 +280,12 @@ OPTIONS
     A value of one will only show where userspace enters the kernel but not any
     functions called in the kernel. The default is zero, which means no limit.
 
+*--cmdlines-size* 'size'::
+    Set the number of entries the kernel tracing file "saved_cmdlines" can
+    contain. This file is a circular buffer which stores the mapping between
+    cmdlines and PIDs. If full, it leads to unresolved cmdlines ("<...>") within
+    the trace. The kernel default value is 128.
+
 *--module* 'module'::
     Filter a module's name in function tracing. It is equivalent to adding
     ':mod:module' after all other functions being filtered. If no other function
@@ -288,6 +297,9 @@ OPTIONS
 
     '--module snd -n "*"' is equivalent to '-n :mod:snd'
 
+*--proc-map*::
+     Save the traced process address map into the trace.dat file. The traced
+     processes can be specified using the option *-P*, or as a given 'command'.
 
 *--profile*::
     With the *--profile* option, "trace-cmd" will enable tracing that can
@@ -299,6 +311,10 @@ OPTIONS
     where tasks have been blocked for the longest time.
 
     See trace-cmd-profile(1) for more details and examples.
+
+*-G*::
+    Set interrupt (soft and hard) events as global (associated to CPU
+    instead of tasks). Only works for --profile.
 
 *-H* 'event-hooks'::
     Add custom event matching to connect any two events together. When not
@@ -325,6 +341,13 @@ OPTIONS
     is in raw units. That is, if the event timestamps are in nanoseconds
     the offset will also be in nanoseconds even if the displayed units are
     in microseconds.
+
+*--tsync-interval*::
+    Set the loop interval, in ms, for timestamps synchronization with guests:
+        If a negative number is specified, timestamps synchronization is disabled
+        If 0 is specified, no loop is performed - timestamps offset is calculated only twice,"
+        at the beginning and at the end of the trace.
+        Timestamps synchronization with guests works only if there is support for VSOCK.\n"
 
 *--stderr*::
     Have output go to stderr instead of stdout, but the output of the command

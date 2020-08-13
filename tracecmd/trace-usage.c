@@ -34,7 +34,7 @@ static struct usage_help usage_help[] = {
 		"          -n do not trace function\n"
 		"          -m max size per CPU in kilobytes\n"
 		"          -M set CPU mask to trace\n"
-		"          -v will negate all -e after it (disable those events)\n"
+		"          -v will negate all -e (disable those events) and -B (delete those instances) after it\n"
 		"          -d disable function tracer when running\n"
 		"          -D Full disable of function tracing (for all users)\n"
 		"          -o data output file [default trace.dat]\n"
@@ -49,6 +49,7 @@ static struct usage_help usage_help[] = {
 		"          -k do not reset the buffers after tracing.\n"
 		"          -i do not fail if an event is not found\n"
 		"          -q print no output to the screen\n"
+		"          -G when profiling, set soft and hard irqs as global\n"
 		"          --quiet print no output to the screen\n"
 		"          --module filter module name\n"
 		"          --by-comm used with --profile, merge events for related comms\n"
@@ -56,14 +57,59 @@ static struct usage_help usage_help[] = {
 		"          --func-stack perform a stack trace for function tracer\n"
 		"             (use with caution)\n"
 		"          --max-graph-depth limit function_graph depth\n"
+		"          --cmdlines-size change kernel saved_cmdlines_size\n"
 		"          --no-filter include trace-cmd threads in the trace\n"
+		"          --proc-map save the traced processes address map into the trace.dat file\n"
+		"          --user execute the specified [command ...] as given user\n"
+		"          --tsync-interval set the loop interval, in ms, for timestamps synchronization with guests:"
+		"               If a negative number is specified, timestamps synchronization is disabled"
+		"               If 0 is specified, no loop is performed - timestamps offset is calculated only twice,"
+		"                                                         at the beginnig and at the end of the trace\n"
+	},
+	{
+		"set",
+		"set a ftrace configuration parameter",
+		" %s set [-v][-e event [-f filter]][-p plugin][-F][-d][-D] \\\n"
+		"           [-q][-s usecs][-O option ][-l func][-g func][-n func] \\\n"
+		"           [-P pid][-b size][-B buf][-m max][-C clock][command ...]\n"
+		"          -e enable event\n"
+		"          -f filter for previous -e event\n"
+		"          -R trigger for previous -e event\n"
+		"          -p set ftrace plugin\n"
+		"          -P set PIDs to be traced\n"
+		"          -c also trace the children of -F (or -P if kernel supports it)\n"
+		"          -C set the trace clock\n"
+		"          -T do a stacktrace on all events\n"
+		"          -l filter function name\n"
+		"          -g set graph function\n"
+		"          -n do not trace function\n"
+		"          -m max size per CPU in kilobytes\n"
+		"          -M set CPU mask to trace\n"
+		"          -v will negate all -e (disable those events) and -B (delete those instances) after it\n"
+		"          -d disable function tracer when running\n"
+		"          -D Full disable of function tracing (for all users)\n"
+		"          -O option to enable (or disable)\n"
+		"          -b change kernel buffersize (in kilobytes per CPU)\n"
+		"          -B create sub buffer and following events will be enabled here\n"
+		"          -i do not fail if an event is not found\n"
+		"          -q print no output to the screen\n"
+		"          --quiet print no output to the screen\n"
+		"          --module filter module name\n"
+		"          --func-stack perform a stack trace for function tracer\n"
+		"             (use with caution)\n"
+		"          --max-graph-depth limit function_graph depth\n"
+		"          --cmdlines-size change kernel saved_cmdlines_size\n"
+		"          --user execute the specified [command ...] as given user\n"
+		"          --fork return immediately if a command is specified\n"
 	},
 	{
 		"start",
 		"start tracing without recording into a file",
 		" %s start [-e event][-p plugin][-d][-O option ][-P pid]\n"
-		"          Uses same options as record, but does not run a command.\n"
+		"          Uses same options as record.\n"
 		"          It only enables the tracing and exits\n"
+		"\n"
+		"        --fork: If a command is specified, then return right after it forks\n"
 	},
 	{
 		"extract",
@@ -145,7 +191,7 @@ static struct usage_help usage_help[] = {
 		"           [-G]\n"
 		"          -i input file [default trace.dat]\n"
 		"          -e show file endianess\n"
-		"          -f show function list\n"
+		"          -f show function mapping list\n"
 		"          -P show printk list\n"
 		"          -E show event files stored\n"
 		"          -F filter to filter output on\n"
@@ -163,6 +209,8 @@ static struct usage_help usage_help[] = {
 		"          -w show wakeup latencies\n"
 		"          -l show latency format (default with latency tracers)\n"
 		"          -O plugin option -O [plugin:]var[=val]\n"
+		"          --cpu <cpu1,cpu2,...> - filter events according to the given cpu list.\n"
+		"                                  A range of CPUs can be specified using 'cpuX-cpuY' notation.\n"
 		"          --check-events return whether all event formats can be parsed\n"
 		"          --stat - show the buffer stats that were reported at the end of the record.\n"
 		"          --uname - show uname of the record, if it was saved\n"
@@ -233,11 +281,31 @@ static struct usage_help usage_help[] = {
 		"listen on a network socket for trace clients",
 		" %s listen -p port[-D][-o file][-d dir][-l logfile]\n"
 		"          Creates a socket to listen for clients.\n"
-		"          -D create it in daemon mode.\n"
+		"          -p port number to listen on.\n"
+		"          -D run in daemon mode.\n"
 		"          -o file name to use for clients.\n"
 		"          -d directory to store client files.\n"
 		"          -l logfile to write messages to.\n"
 	},
+#ifdef VSOCK
+	{
+		"agent",
+		"listen on a vsocket for trace clients",
+		" %s agent -p port[-D]\n"
+		"          Creates a vsocket to listen for clients.\n"
+		"          -p port number to listen on.\n"
+		"          -D run in daemon mode.\n"
+	},
+	{
+		"setup-guest",
+		"create FIFOs for tracing guest VMs",
+		" %s setup-guest [-c cpus][-p perm][-g group][-a] guest\n"
+		"          -c number of guest virtual CPUs\n"
+		"          -p FIFOs permissions (default: 0660)\n"
+		"          -g FIFOs group owner\n"
+		"          -a Attach FIFOs to guest VM config\n"
+	},
+#endif
 	{
 		"list",
 		"list the available events, plugins or options",
@@ -288,6 +356,26 @@ static struct usage_help usage_help[] = {
 		"          -N do not load any plugins\n"
 	},
 	{
+		"dump",
+		"read out the meta data from a trace file",
+		" %s dump [options]\n"
+		"          -i input file, default is trace.dat\n"
+		"          -v validate a trace file\n"
+		"          --all print all meta data from a trace file\n"
+		"          --summary print a meta data summary\n"
+		"          --head-page print header page information\n"
+		"          --head-event print header event information\n"
+		"          --ftrace-events print ftrace events format\n"
+		"          --systems print recorded event systems\n"
+		"          --events print format of recorded events\n"
+		"          --kallsyms print information of the mapping of function addresses to the function names\n"
+		"          --printk print trace_printk() format strings\n"
+		"          --cmd-lines print information mapping a PID to a process name\n"
+		"          --options print options\n"
+		"          --flyrecord information of offset and count of recorded events per CPU\n"
+		"          -h, --help show usage information\n"
+	},
+	{
 		NULL, NULL, NULL
 	}
 };
@@ -314,8 +402,8 @@ void usage(char **argv)
 	p = basename(arg);
 
 	printf("\n"
-	       "%s version %s\n\n"
-	       "usage:\n", p, VERSION_STRING);
+	       "%s version %s (%s)\n\n"
+	       "usage:\n", p, VERSION_STRING, VERSION_GIT);
 
 	if (argv[1])
 		help = find_help(argv[1]);

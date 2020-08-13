@@ -62,7 +62,7 @@ KsTraceGraph::KsTraceGraph(QWidget *parent)
 
 	_pointerBar.addWidget(&_labelP1);
 	_labelP2.setFrameStyle(QFrame::Panel | QFrame::Sunken);
-	_labelP2.setStyleSheet("QLabel { background-color : white;}");
+	_labelP2.setStyleSheet("QLabel { background-color : white; color: black}");
 	_labelP2.setTextInteractionFlags(Qt::TextSelectableByMouse);
 	_labelP2.setFixedWidth(FONT_WIDTH * 16);
 	_pointerBar.addWidget(&_labelP2);
@@ -96,6 +96,8 @@ KsTraceGraph::KsTraceGraph(QWidget *parent)
 	_legendAxisX.layout()->addWidget(&_labelXMin);
 	_legendAxisX.layout()->addWidget(&_labelXMid);
 	_legendAxisX.layout()->addWidget(&_labelXMax);
+	_legendAxisX.setStyleSheet("QLabel { background-color : white; color: black}");
+
 	_drawWindow.setMinimumSize(100, 100);
 	_drawWindow.setStyleSheet("QWidget {background-color : white;}");
 
@@ -234,6 +236,9 @@ void KsTraceGraph::_zoomOut()
 
 void KsTraceGraph::_quickZoomIn()
 {
+	if (_glWindow.isEmpty())
+		return;
+
 	/* Bin size will be 100 ns. */
 	_glWindow.model()->quickZoomIn(100);
 	if (_mState->activeMarker()._isSet &&
@@ -249,6 +254,9 @@ void KsTraceGraph::_quickZoomIn()
 
 void KsTraceGraph::_quickZoomOut()
 {
+	if (_glWindow.isEmpty())
+		return;
+
 	_glWindow.model()->quickZoomOut();
 }
 
@@ -277,7 +285,7 @@ void KsTraceGraph::_resetPointer(uint64_t ts, int cpu, int pid)
 	QString pointer;
 
 	kshark_convert_nano(ts, &sec, &usec);
-	pointer.sprintf("%lu.%06lu", sec, usec);
+	pointer.sprintf("%" PRIu64 ".%06" PRIu64 "", sec, usec);
 	_labelP2.setText(pointer);
 
 	if (pid > 0 && cpu >= 0) {
@@ -313,7 +321,7 @@ void KsTraceGraph::_setPointerInfo(size_t i)
 	uint64_t sec, usec;
 
 	kshark_convert_nano(e->ts, &sec, &usec);
-	pointer.sprintf("%lu.%06lu", sec, usec);
+	pointer.sprintf("%" PRIu64 ".%06" PRIu64 "", sec, usec);
 	_labelP2.setText(pointer);
 
 	comm.append("-");
@@ -574,7 +582,7 @@ void KsTraceGraph::_updateGraphLegends()
 			width = STRING_WIDTH(graphName);
 
 		name->setAlignment(Qt::AlignBottom);
-		name->setStyleSheet("QLabel {background-color : white;}");
+		name->setStyleSheet("QLabel {background-color : white; color : black}");
 		name->setFixedHeight(KS_GRAPH_HEIGHT);
 		layout->addWidget(name);
 	};
@@ -601,17 +609,17 @@ void KsTraceGraph::_updateTimeLegends()
 	QString tMin, tMid, tMax;
 
 	kshark_convert_nano(_glWindow.model()->histo()->min, &sec, &usec);
-	tMin.sprintf("%lu.%06lu", sec, usec);
+	tMin.sprintf("%" PRIu64 ".%06" PRIu64 "", sec, usec);
 	_labelXMin.setText(tMin);
 
 	tsMid = (_glWindow.model()->histo()->min +
 		 _glWindow.model()->histo()->max) / 2;
 	kshark_convert_nano(tsMid, &sec, &usec);
-	tMid.sprintf("%lu.%06lu", sec, usec);
+	tMid.sprintf("%" PRIu64 ".%06" PRIu64 "", sec, usec);
 	_labelXMid.setText(tMid);
 
 	kshark_convert_nano(_glWindow.model()->histo()->max, &sec, &usec);
-	tMax.sprintf("%lu.%06lu", sec, usec);
+	tMax.sprintf("%" PRIu64 ".%06" PRIu64 "", sec, usec);
 	_labelXMax.setText(tMax);
 }
 
@@ -645,6 +653,9 @@ void KsTraceGraph::_updateGraphs(GraphActions action)
 {
 	double k;
 	int bin;
+
+	if (_glWindow.isEmpty())
+		return;
 
 	/*
 	 * Set the "Key Pressed" flag. The flag will stay set as long as the user

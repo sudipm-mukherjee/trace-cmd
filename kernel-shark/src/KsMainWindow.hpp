@@ -19,6 +19,7 @@
 // KernelShark
 #include "KsTraceViewer.hpp"
 #include "KsTraceGraph.hpp"
+#include "KsWidgetsLib.hpp"
 #include "KsSession.hpp"
 #include "KsUtils.hpp"
 
@@ -60,6 +61,10 @@ public:
 	{
 		_plugins.unregisterPlugin(plugin);
 	}
+
+	void setCPUPlots(QVector<int> cpus);
+
+	void setTaskPlots(QVector<int> pids);
 
 	void resizeEvent(QResizeEvent* event);
 
@@ -159,6 +164,8 @@ private:
 
 	QSettings	_settings;
 
+	QMetaObject::Connection		_captureErrorConnection;
+
 	void _open();
 
 	void _restoreSession();
@@ -175,15 +182,19 @@ private:
 
 	void _graphFilterSync(int state);
 
+	void _presetCBWidget(tracecmd_filter_id *showFilter,
+			     tracecmd_filter_id *hideFilter,
+			     KsCheckBoxWidget *cbw);
+
+	void _applyFilter(QVector<int> all, QVector<int> show,
+			  std::function<void(QVector<int>)> posFilter,
+			  std::function<void(QVector<int>)> negFilter);
+
 	void _showEvents();
 
 	void _showTasks();
 
-	void _hideTasks();
-
 	void _showCPUs();
-
-	void _hideCPUs();
 
 	void _advancedFiltering();
 
@@ -213,6 +224,8 @@ private:
 
 	void _captureError(QProcess::ProcessError error);
 
+	void _captureErrorMessage(QProcess *capture);
+
 	void _readSocket();
 
 	void _splitterMoved(int pos, int index);
@@ -235,6 +248,8 @@ private:
 	void _deselectA();
 
 	void _deselectB();
+
+	void _rootWarning();
 
 	void _updateFilterMenu();
 

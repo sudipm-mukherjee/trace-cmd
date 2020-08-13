@@ -10,9 +10,15 @@ OBJS =
 OBJS += trace-hash.o
 OBJS += trace-hooks.o
 OBJS += trace-input.o
+OBJS += trace-output.o
 OBJS += trace-recorder.o
 OBJS += trace-util.o
 OBJS += trace-filter-hash.o
+OBJS += trace-msg.o
+OBJS += trace-plugin.o
+ifeq ($(VSOCK_DEFINED), 1)
+OBJS += trace-timesync.o
+endif
 
 # Additional util objects
 OBJS += trace-blk-hack.o
@@ -32,16 +38,16 @@ $(DEPS): | $(bdir)
 $(bdir)/libtracecmd.a: $(OBJS)
 	$(Q)$(call do_build_static_lib)
 
+LIBS = -L$(obj)/lib/traceevent -ltraceevent
+
 $(bdir)/libtracecmd.so: $(OBJS)
 	$(Q)$(call do_compile_shared_library)
 
 $(bdir)/%.o: %.c
 	$(Q)$(call do_fpic_compile)
 
-$(bdir)/trace-util.o: $(obj)/plugins/trace_plugin_dir
-
 $(DEPS): $(bdir)/.%.d: %.c
-	$(Q)$(CC) -M $(CPPFLAGS) $(CFLAGS) $< > $@
+	$(Q)$(CC) -M -MT $(bdir)/$*.o $(CPPFLAGS) $(CFLAGS) $< > $@
 
 $(OBJS): $(bdir)/%.o : $(bdir)/.%.d
 

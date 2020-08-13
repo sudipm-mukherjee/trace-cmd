@@ -28,6 +28,7 @@ extern "C" {
 #include "trace-cmd/trace-cmd.h"
 #include "trace-cmd/trace-filter-hash.h"
 #include "traceevent/event-parse.h"
+#include "tracefs/tracefs.h"
 
 // KernelShark
 #include "libkshark-plugin.h"
@@ -72,7 +73,8 @@ struct kshark_entry {
 };
 
 /** Size of the task's hash table. */
-#define KS_TASK_HASH_SIZE 256
+#define KS_TASK_HASH_SHIFT 16
+#define KS_TASK_HASH_SIZE (1 << KS_TASK_HASH_SHIFT)
 
 /** Linked list of tasks. */
 struct kshark_task_list {
@@ -259,6 +261,8 @@ void kshark_filter_add_id(struct kshark_context *kshark_ctx,
 
 void kshark_filter_clear(struct kshark_context *kshark_ctx, int filter_id);
 
+bool kshark_this_filter_is_set(struct tracecmd_filter_id *filter);
+
 bool kshark_filter_is_set(struct kshark_context *kshark_ctx);
 
 void kshark_filter_entries(struct kshark_context *kshark_ctx,
@@ -444,13 +448,13 @@ void kshark_reset_data_collection(struct kshark_entry_collection *col);
 void kshark_free_collection_list(struct kshark_entry_collection *col);
 
 const struct kshark_entry *
-kshark_get_collection_entry_front(struct kshark_entry_request **req,
+kshark_get_collection_entry_front(struct kshark_entry_request *req,
 				  struct kshark_entry **data,
 				  const struct kshark_entry_collection *col,
 				  ssize_t *index);
 
 const struct kshark_entry *
-kshark_get_collection_entry_back(struct kshark_entry_request **req,
+kshark_get_collection_entry_back(struct kshark_entry_request *req,
 				 struct kshark_entry **data,
 				 const struct kshark_entry_collection *col,
 				 ssize_t *index);
@@ -587,10 +591,10 @@ bool kshark_export_event_filter(struct tep_handle *pevent,
 				const char *filter_name,
 				struct kshark_config_doc *conf);
 
-bool kshark_import_event_filter(struct tep_handle *pevent,
-				struct tracecmd_filter_id *filter,
-				const char *filter_name,
-				struct kshark_config_doc *conf);
+int kshark_import_event_filter(struct tep_handle *pevent,
+			       struct tracecmd_filter_id *filter,
+			       const char *filter_name,
+			       struct kshark_config_doc *conf);
 
 bool kshark_export_user_mask(struct kshark_context *kshark_ctx,
 			     struct kshark_config_doc **conf);

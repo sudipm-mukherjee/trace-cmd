@@ -15,6 +15,7 @@
 #include <unistd.h>
 #include <errno.h>
 
+#include "tracefs.h"
 #include "trace-local.h"
 
 #define PROC_FILE "/proc/sys/kernel/stack_tracer_enabled"
@@ -36,58 +37,6 @@ static void test_available(void)
 		die("stack tracer not configured on running kernel");
 }
 
-/*
- * Returns:
- *   -1 - Something went wrong
- *    0 - File does not exist (stack tracer not enabled)
- *    1 - Success
- */
-static int read_proc(int *status)
-{
-	struct stat stat_buf;
-	char buf[64];
-	long num;
-	int fd;
-	int n;
-
-	if (stat(PROC_FILE, &stat_buf) < 0) {
-		/* stack tracer not configured on running kernel */
-		*status = 0; /* not configured means disabled */
-		return 0;
-	}
-
-	fd = open(PROC_FILE, O_RDONLY);
-
-	if (fd < 0)
-		return -1;
-
-	n = read(fd, buf, sizeof(buf));
-	close(fd);
-
-	if (n <= 0)
-		return -1;
-
-	if (n >= sizeof(buf))
-		return -1;
-
-	buf[n] = 0;
-	errno = 0;
-	num = strtol(buf, NULL, 10);
-
-	/* Check for various possible errors */
-	if (num > INT_MAX || num < INT_MIN || (!num && errno))
-		return -1;
-
-	*status = num;
-	return 1; /* full success */
-}
-
-/* Public wrapper of read_proc() */
-int tracecmd_stack_tracer_status(int *status)
-{
-	return read_proc(status);
-}
-
 /* NOTE: this implementation only accepts new_status in the range [0..9]. */
 static void change_stack_tracer_status(unsigned new_status)
 {
@@ -102,7 +51,7 @@ static void change_stack_tracer_status(unsigned new_status)
 		return;
 	}
 
-	ret = read_proc(&status);
+	ret = tracecmd_stack_tracer_status(&status);
 	if (ret < 0)
 		die("error reading %s", PROC_FILE);
 
@@ -138,7 +87,7 @@ static void reset_trace(void)
 	int fd;
 	int n;
 
-	path = tracecmd_get_tracing_file("stack_max_size");
+	path = tracefs_get_tracing_file("stack_max_size");
 	fd = open(path, O_WRONLY);
 	if (fd < 0)
 		die("writing %s", path);
@@ -147,7 +96,7 @@ static void reset_trace(void)
 	n = write(fd, buf, 1);
 	if (n < 0)
 		die("writing into %s", path);
-	tracecmd_put_tracing_file(path);
+	tracefs_put_tracing_file(path);
 	close(fd);
 }
 
@@ -160,7 +109,7 @@ static void read_trace(void)
 	size_t n;
 	int r;
 
-	if (read_proc(&status) <= 0)
+	if (tracecmd_stack_tracer_status(&status) <= 0)
 		die("Invalid stack tracer state");
 
 	if (status > 0)
@@ -168,11 +117,11 @@ static void read_trace(void)
 	else
 		printf("(stack tracer not running)\n");
 
-	path = tracecmd_get_tracing_file("stack_trace");
+	path = tracefs_get_tracing_file("stack_trace");
 	fp = fopen(path, "r");
 	if (!fp)
 		die("reading to '%s'", path);
-	tracecmd_put_tracing_file(path);
+	tracefs_put_tracing_file(path);
 
 	while ((r = getline(&buf, &n, fp)) >= 0) {
 		/*

@@ -21,7 +21,14 @@ system or can be extracted with trace-cmd-extract(1).
 OPTIONS
 -------
 The options are the same as 'trace-cmd-record(1)', except that it does not
-take options specific to recording (*-s*, *-o*, *-F*, *-N*, and *-t*).
+take options specific to recording (*-s*, *-o*, *-N*, and *-t*).
+
+*--fork* ::
+   This option is only available for trace-cmd start. It tells trace-cmd
+   to not wait for the process to finish before returning.
+   With this option, trace-cmd start will return right after it forks
+   the process on the command line. This option only has an effect if
+   trace-cmd start also executes a command.
 
 SEE ALSO
 --------

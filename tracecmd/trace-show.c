@@ -7,6 +7,7 @@
 #include <getopt.h>
 #include <errno.h>
 
+#include "tracefs.h"
 #include "trace-local.h"
 
 enum {
@@ -50,6 +51,8 @@ void trace_show(int argc, char **argv)
 		{"help", no_argument, NULL, '?'},
 		{NULL, 0, NULL, 0}
 	};
+
+	init_top_instance();
 
 	while ((c = getopt_long(argc-1, argv+1, "B:c:fsp",
 				long_options, &option_index)) >= 0) {
@@ -157,9 +160,9 @@ void trace_show(int argc, char **argv)
 
 	if (show_name) {
 		char *name;
-		name = tracecmd_get_tracing_file(file);
+		name = tracefs_get_tracing_file(file);
 		printf("%s\n", name);
-		tracecmd_put_tracing_file(name);
+		tracefs_put_tracing_file(name);
 	}
 	show_file(file);
 	if (buffer)

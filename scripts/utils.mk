@@ -15,6 +15,13 @@ endif
 ifeq ($(VERBOSE),1)
   Q =
   S =
+else
+  Q = @
+  S = -s
+endif
+
+# Use empty print_* macros if either SILENT or VERBOSE.
+ifeq ($(findstring 1,$(SILENT)$(VERBOSE)),1)
   print_compile =
   print_app_build =
   print_fpic_compile =
@@ -22,9 +29,8 @@ ifeq ($(VERBOSE),1)
   print_plugin_obj_compile =
   print_plugin_build =
   print_install =
+  print_update =
 else
-  Q = @
-  S = -s
   print_compile =		echo '  $(GUI)COMPILE            '$(GOBJ);
   print_app_build =		echo '  $(GUI)BUILD              '$(GOBJ);
   print_fpic_compile =		echo '  $(GUI)COMPILE FPIC       '$(GOBJ);
@@ -33,6 +39,7 @@ else
   print_plugin_build =		echo '  $(GUI)BUILD PLUGIN       '$(GOBJ);
   print_static_lib_build =	echo '  $(GUI)BUILD STATIC LIB   '$(GOBJ);
   print_install =		echo '  $(GUI)INSTALL     '$(GSPACE)$1'	to	$(DESTDIR_SQ)$2';
+  print_update =		echo '  $(GUI)UPDATE             '$(GOBJ);
 endif
 
 do_fpic_compile =					\
@@ -54,7 +61,7 @@ do_build_static_lib =				\
 
 do_compile_shared_library =			\
 	($(print_shared_lib_compile)		\
-	$(CC) --shared $^ -Wl,-soname,$@ -o $@)
+	$(CC) --shared $^ $(LIBS) -Wl,-soname,$(@F) -o $@)
 
 do_compile_plugin_obj =				\
 	($(print_plugin_obj_compile)		\
@@ -96,7 +103,7 @@ define update_version.h
 	if [ -r $@ ] && cmp -s $@ $@.tmp; then				\
 		rm -f $@.tmp;						\
 	else								\
-		echo '  UPDATE                 '$(notdir $(strip $@));	\
+		$(print_update)						\
 		mv -f $@.tmp $@;					\
 	fi);
 endef
@@ -106,7 +113,7 @@ define update_dir
 	if [ -r $@ ] && cmp -s $@ $@.tmp; then				\
 		rm -f $@.tmp;						\
 	else								\
-		echo '  UPDATE                 '$(notdir $(strip $@));	\
+		$(print_update)						\
 		mv -f $@.tmp $@;					\
 	fi);
 endef
@@ -125,4 +132,14 @@ define do_install_data
 		$(INSTALL) -d -m 755 '$(DESTDIR_SQ)$2';	\
 	fi;						\
 	$(INSTALL) -m 644 $1 '$(DESTDIR_SQ)$2'
+endef
+
+define do_install_ld
+	if [ -d '$(DESTDIR_SQ)$2' ]; then				\
+		$(print_install)					\
+		if ! grep -q $3 $(DESTDIR_SQ)$2/$1 2>/dev/null; then	\
+			echo '$3' >> $(DESTDIR_SQ)$2/$1;		\
+			ldconfig;					\
+		fi							\
+	fi
 endef

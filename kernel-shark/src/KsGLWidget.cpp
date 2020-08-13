@@ -88,9 +88,11 @@ void KsGLWidget::paintGL()
 
 	glClear(GL_COLOR_BUFFER_BIT);
 
+	if (isEmpty())
+		return;
+
 	/* Draw the time axis. */
-	if(_data)
-		_drawAxisX(size);
+	_drawAxisX(size);
 
 	/* Process and draw all graphs by using the built-in logic. */
 	_makeGraphs(_cpuList, _taskList);
@@ -125,6 +127,13 @@ void KsGLWidget::reset()
 	_taskList = {};
 	_data = nullptr;
 	_model.reset();
+}
+
+/** Check if the widget is empty (not showing anything). */
+bool KsGLWidget::isEmpty() const {
+	return !_data ||
+	       !_data->size() ||
+	       (!_cpuList.size() && !_taskList.size());
 }
 
 /** Reimplemented event handler used to receive mouse press events. */
@@ -198,6 +207,9 @@ void KsGLWidget::mouseMoveEvent(QMouseEvent *event)
 	size_t row;
 	bool ret;
 
+	if (isEmpty())
+		return;
+
 	if (_rubberBand.isVisible())
 		_rangeBoundStretched(_posInRange(event->pos().x()));
 
@@ -224,6 +236,9 @@ void KsGLWidget::mouseMoveEvent(QMouseEvent *event)
 /** Reimplemented event handler used to receive mouse release events. */
 void KsGLWidget::mouseReleaseEvent(QMouseEvent *event)
 {
+	if (isEmpty())
+		return;
+
 	if (event->button() == Qt::LeftButton) {
 		size_t posMouseRel = _posInRange(event->pos().x());
 		int min, max;
@@ -250,6 +265,9 @@ void KsGLWidget::mouseDoubleClickEvent(QMouseEvent *event)
 void KsGLWidget::wheelEvent(QWheelEvent * event)
 {
 	int zoomFocus;
+
+	if (isEmpty())
+		return;
 
 	if (_mState->activeMarker()._isSet &&
 	    _mState->activeMarker().isVisible()) {
@@ -323,6 +341,11 @@ void KsGLWidget::keyReleaseEvent(QKeyEvent *event)
 }
 
 /**
+ * The maximum number of CPU plots to be shown by default when the GUI starts.
+ */
+#define KS_MAX_START_PLOTS 16
+
+/**
  * @brief Load and show trace data.
  *
  * @param data: Input location for the KsDataStore object.
@@ -340,7 +363,6 @@ void KsGLWidget::loadData(KsDataStore *data)
 	 * One bin will correspond to one pixel.
 	 */
 	nBins = width() - _hMargin * 2;
-	nCPUs = tep_get_cpus(_data->tep());
 
 	_model.reset();
 
@@ -350,8 +372,13 @@ void KsGLWidget::loadData(KsDataStore *data)
 	ksmodel_set_bining(_model.histo(), nBins, tMin, tMax);
 	_model.fill(_data->rows(), _data->size());
 
-	/* Make a default CPU list. All CPUs will be plotted. */
+	/* Make a default CPU list. All CPUs (or the first N_max) will be plotted. */
 	_cpuList = {};
+
+	nCPUs = tep_get_cpus(_data->tep());
+	if (nCPUs > KS_MAX_START_PLOTS)
+		nCPUs = KS_MAX_START_PLOTS;
+
 	for (int i = 0; i < nCPUs; ++i)
 		_cpuList.append(i);
 

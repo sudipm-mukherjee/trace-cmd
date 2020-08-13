@@ -5,7 +5,9 @@
  */
 
 #include <stdlib.h>
+#include <sys/stat.h>
 
+#include "tracefs.h"
 #include "trace-local.h"
 
 
@@ -33,9 +35,9 @@ void show_instance_file(struct buffer_instance *instance, const char *name)
 {
 	char *path;
 
-	path = get_instance_file(instance, name);
+	path = tracefs_instance_get_file(instance->tracefs, name);
 	dump_file_content(path);
-	tracecmd_put_tracing_file(path);
+	tracefs_put_tracing_file(path);
 }
 
 enum {
@@ -49,9 +51,9 @@ void show_file(const char *name)
 {
 	char *path;
 
-	path = tracecmd_get_tracing_file(name);
+	path = tracefs_get_tracing_file(name);
 	dump_file_content(path);
-	tracecmd_put_tracing_file(path);
+	tracefs_put_tracing_file(path);
 }
 
 typedef int (*process_file_func)(char *buf, int len);
@@ -86,11 +88,11 @@ static void process_file_re(process_file_func func,
 
 	free(str);
 
-	path = tracecmd_get_tracing_file(name);
+	path = tracefs_get_tracing_file(name);
 	fp = fopen(path, "r");
 	if (!fp)
 		die("reading %s", path);
-	tracecmd_put_tracing_file(path);
+	tracefs_put_tracing_file(path);
 
 	do {
 		n = getline(&buf, &l, fp);
@@ -132,12 +134,12 @@ static char *get_event_file(const char *type, char *buf, int len)
 	if (!event)
 		die("no event found in %s\n", buf);
 
-	path = tracecmd_get_tracing_file("events");
+	path = tracefs_get_tracing_file("events");
 	ret = asprintf(&file, "%s/%s/%s/%s", path, system, event, type);
 	if (ret < 0)
 		die("Failed to allocate event file %s %s", system, event);
 
-	tracecmd_put_tracing_file(path);
+	tracefs_put_tracing_file(path);
 
 	return file;
 }
@@ -282,9 +284,9 @@ static void show_buffers(void)
 	char *path;
 	int printed = 0;
 
-	path = tracecmd_get_tracing_file("instances");
+	path = tracefs_get_tracing_file("instances");
 	dir = opendir(path);
-	tracecmd_put_tracing_file(path);
+	tracefs_put_tracing_file(path);
 	if (!dir)
 		die("Can not read instance directory");
 
@@ -305,6 +307,42 @@ static void show_buffers(void)
 }
 
 
+static void show_systems(void)
+{
+	struct dirent *dent;
+	char *path;
+	DIR *dir;
+
+	path = tracefs_get_tracing_file("events");
+	dir = opendir(path);
+
+	if (!dir)
+		die("Can not read events directory");
+
+	while ((dent = readdir(dir))) {
+		const char *name = dent->d_name;
+		struct stat st;
+		char *spath;
+		int ret;
+
+		if (strcmp(name, ".") == 0 ||
+		    strcmp(name, "..") == 0)
+			continue;
+
+		if (asprintf(&spath, "%s/%s", path, name) < 0)
+			continue;
+		ret = stat(spath, &st);
+		if (!ret && S_ISDIR(st.st_mode))
+			printf("%s\n", name);
+
+		free(spath);
+	}
+
+	printf("\n");
+	closedir(dir);
+	tracefs_put_tracing_file(path);
+}
+
 static void show_plugin_options(void)
 {
 	struct tep_handle *pevent;
@@ -319,10 +357,10 @@ static void show_plugin_options(void)
 
 	trace_seq_init(&s);
 
-	list = tracecmd_load_plugins(pevent);
-	trace_util_print_plugin_options(&s);
+	list = trace_load_plugins(pevent);
+	tep_plugin_print_options(&s);
 	trace_seq_do_printf(&s);
-	tracecmd_unload_plugins(list, pevent);
+	tep_unload_plugins(list, pevent);
 	tep_free(pevent);
 }
 
@@ -345,10 +383,11 @@ static void show_plugins(void)
 
 	trace_seq_init(&s);
 
-	list = tracecmd_load_plugins(pevent);
-	trace_util_print_plugins(&s, "  ", "\n", list);
+	list = trace_load_plugins(pevent);
+	tep_print_plugins(&s, "  ", "\n", list);
+
 	trace_seq_do_printf(&s);
-	tracecmd_unload_plugins(list, pevent);
+	tep_unload_plugins(list, pevent);
 	tep_free(pevent);
 }
 
@@ -364,6 +403,7 @@ void trace_list(int argc, char **argv)
 	int plug = 0;
 	int plug_op = 0;
 	int flags = 0;
+	int systems = 0;
 	int show_all = 1;
 	int i;
 	const char *arg;
@@ -425,9 +465,13 @@ void trace_list(int argc, char **argv)
 				funcre = arg;
 				show_all = 0;
 				break;
+			case 's':
+				systems = 1;
+				show_all = 0;
+				break;
 			case '-':
 				if (strcmp(argv[i], "--debug") == 0) {
-					debug = true;
+					tracecmd_set_debug(true);
 					break;
 				}
 				fprintf(stderr, "list: invalid option -- '%s'\n",
@@ -463,8 +507,11 @@ void trace_list(int argc, char **argv)
 
 	if (clocks)
 		show_clocks();
-
+	if (systems)
+		show_systems();
 	if (show_all) {
+		printf("event systems:\n");
+		show_systems();
 		printf("events:\n");
 		show_events(NULL, 0);
 		printf("\ntracers:\n");

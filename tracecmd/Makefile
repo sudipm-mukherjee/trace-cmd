@@ -29,9 +29,16 @@ TRACE_CMD_OBJS += trace-restore.o
 TRACE_CMD_OBJS += trace-check-events.o
 TRACE_CMD_OBJS += trace-show.o
 TRACE_CMD_OBJS += trace-list.o
-TRACE_CMD_OBJS += trace-output.o
 TRACE_CMD_OBJS += trace-usage.o
-TRACE_CMD_OBJS += trace-msg.o
+TRACE_CMD_OBJS += trace-dump.o
+ifeq ($(VSOCK_DEFINED), 1)
+TRACE_CMD_OBJS += trace-tsync.o
+endif
+
+ifeq ($(VSOCK_DEFINED), 1)
+TRACE_CMD_OBJS += trace-agent.o
+TRACE_CMD_OBJS += trace-setup-guest.o
+endif
 
 ALL_OBJS := $(TRACE_CMD_OBJS:%.o=$(bdir)/%.o)
 
@@ -39,7 +46,7 @@ all_objs := $(sort $(ALL_OBJS))
 all_deps := $(all_objs:$(bdir)/%.o=$(bdir)/.%.d)
 
 CONFIG_INCLUDES =
-CONFIG_LIBS	= -lrt
+CONFIG_LIBS	= -lrt -lpthread
 CONFIG_FLAGS	=
 
 all: $(TARGETS)
@@ -59,13 +66,13 @@ $(all_objs): | $(bdir)
 $(bdir)/trace-cmd: $(ALL_OBJS)
 	$(Q)$(do_app_build)
 
-$(bdir)/trace-cmd: $(LIBTRACECMD_STATIC) $(LIBTRACEEVENT_STATIC)
+$(bdir)/trace-cmd: $(LIBTRACECMD_STATIC) $(LIBTRACEEVENT_STATIC) $(LIBTRACEFS_STATIC)
 
 $(bdir)/%.o: %.c
 	$(Q)$(call do_compile)
 
 $(all_deps): $(bdir)/.%.d: %.c
-	$(Q)$(CC) -M $(CPPFLAGS) $(CFLAGS) $< > $@
+	$(Q)$(CC) -M -MT $(bdir)/$*.o $(CPPFLAGS) $(CFLAGS) $< > $@
 
 $(all_deps): $(TC_VERSION)
 

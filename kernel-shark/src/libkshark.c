@@ -160,8 +160,8 @@ bool kshark_open(struct kshark_context *kshark_ctx, const char *file)
 	 * Turn off function trace indent and turn on show parent
 	 * if possible.
 	 */
-	trace_util_add_option("ftrace:parent", "1");
-	trace_util_add_option("ftrace:indent", "0");
+	tep_plugin_add_option("ftrace:parent", "1");
+	tep_plugin_add_option("ftrace:indent", "0");
 
 	return true;
 }
@@ -252,19 +252,8 @@ void kshark_free(struct kshark_context *kshark_ctx)
 	free(kshark_ctx);
 }
 
-static inline uint8_t knuth_hash8(uint32_t val)
-{
-	/*
-	 * Hashing functions, based on Donald E. Knuth's Multiplicative
-	 * hashing. See The Art of Computer Programming (TAOCP).
-	 * Multiplication by the Prime number, closest to the golden
-	 * ratio of 2^8.
-	 */
-	return UINT8_C(val) * UINT8_C(157);
-}
-
 static struct kshark_task_list *
-kshark_find_task(struct kshark_context *kshark_ctx, uint8_t key, int pid)
+kshark_find_task(struct kshark_context *kshark_ctx, uint32_t key, int pid)
 {
 	struct kshark_task_list *list;
 
@@ -280,9 +269,10 @@ static struct kshark_task_list *
 kshark_add_task(struct kshark_context *kshark_ctx, int pid)
 {
 	struct kshark_task_list *list;
-	uint8_t key;
+	uint32_t key;
 
-	key = knuth_hash8(pid);
+	key = tracecmd_quick_hash(pid, KS_TASK_HASH_SHIFT);
+
 	list = kshark_find_task(kshark_ctx, key, pid);
 	if (list)
 		return list;
@@ -455,7 +445,14 @@ void kshark_filter_clear(struct kshark_context *kshark_ctx, int filter_id)
 	tracecmd_filter_id_clear(filter);
 }
 
-static bool filter_is_set(struct tracecmd_filter_id *filter)
+/**
+ * @brief Check if a given Id filter is set.
+ *
+ * @param filter: Input location for the Id filster.
+ *
+ * @returns True if the Id filter is set, otherwise False.
+ */
+bool kshark_this_filter_is_set(struct tracecmd_filter_id *filter)
 {
 	return filter && filter->count;
 }
@@ -469,12 +466,12 @@ static bool filter_is_set(struct tracecmd_filter_id *filter)
  */
 bool kshark_filter_is_set(struct kshark_context *kshark_ctx)
 {
-	return filter_is_set(kshark_ctx->show_task_filter) ||
-	       filter_is_set(kshark_ctx->hide_task_filter) ||
-	       filter_is_set(kshark_ctx->show_cpu_filter) ||
-	       filter_is_set(kshark_ctx->hide_cpu_filter) ||
-	       filter_is_set(kshark_ctx->show_event_filter) ||
-	       filter_is_set(kshark_ctx->hide_event_filter);
+	return kshark_this_filter_is_set(kshark_ctx->show_task_filter) ||
+-              kshark_this_filter_is_set(kshark_ctx->hide_task_filter) ||
+-              kshark_this_filter_is_set(kshark_ctx->show_cpu_filter) ||
+-              kshark_this_filter_is_set(kshark_ctx->hide_cpu_filter) ||
+-              kshark_this_filter_is_set(kshark_ctx->show_event_filter) ||
+-              kshark_this_filter_is_set(kshark_ctx->hide_event_filter);
 }
 
 static inline void unset_event_filter_flag(struct kshark_context *kshark_ctx,
@@ -490,6 +487,11 @@ static inline void unset_event_filter_flag(struct kshark_context *kshark_ctx,
 	int event_mask = kshark_ctx->filter_mask & ~KS_GRAPH_VIEW_FILTER_MASK;
 
 	e->visible &= ~event_mask;
+}
+
+static void set_all_visible(uint16_t *v) {
+	/*  Keep the original value of the PLUGIN_UNTOUCHED bit flag. */
+	*v |= 0xFF & ~KS_PLUGIN_UNTOUCHED_MASK;
 }
 
 /**
@@ -528,7 +530,7 @@ void kshark_filter_entries(struct kshark_context *kshark_ctx,
 	/* Apply only the Id filters. */
 	for (i = 0; i < n_entries; ++i) {
 		/* Start with and entry which is visible everywhere. */
-		data[i]->visible = 0xFF;
+		set_all_visible(&data[i]->visible);
 
 		/* Apply event filtering. */
 		if (!kshark_show_event(kshark_ctx, data[i]->event_id))
@@ -558,9 +560,8 @@ void kshark_clear_all_filters(struct kshark_context *kshark_ctx,
 			      size_t n_entries)
 {
 	int i;
-
 	for (i = 0; i < n_entries; ++i)
-		data[i]->visible = 0xFF;
+		set_all_visible(&data[i]->visible);
 }
 
 static void kshark_set_entry_values(struct kshark_context *kshark_ctx,
@@ -1103,7 +1104,7 @@ static const char *kshark_get_latency(struct tep_handle *pe,
 		return NULL;
 
 	trace_seq_reset(&seq);
-	tep_data_latency_format(pe, &seq, record);
+	tep_print_event(pe, &seq, record, "%s", TEP_PRINT_LATENCY);
 	return seq.buffer;
 }
 
@@ -1117,7 +1118,7 @@ static const char *kshark_get_info(struct tep_handle *pe,
 		return NULL;
 
 	trace_seq_reset(&seq);
-	tep_event_info(&seq, event, record);
+	tep_print_event(pe, &seq, record, "%s", TEP_PRINT_INFO);
 
 	/*
 	 * The event info string contains a trailing newline.
@@ -1423,7 +1424,7 @@ char* kshark_dump_custom_entry(struct kshark_context *kshark_ctx,
 	event_name = info_func(kshark_ctx, entry, false);
 	info = info_func(kshark_ctx, entry, true);
 
-	size = asprintf(&entry_str, "%li; %s-%i; CPU %i; ; %s; %s",
+	size = asprintf(&entry_str, "%" PRIu64 "; %s-%i; CPU %i; ; %s; %s",
 			entry->ts,
 			task,
 			entry->pid,
@@ -1472,7 +1473,7 @@ char* kshark_dump_entry(const struct kshark_entry *entry)
 		event_name = event? event->name : "[UNKNOWN EVENT]";
 		lat = kshark_get_latency(kshark_ctx->pevent, data);
 
-		size = asprintf(&temp_str, "%li; %s-%i; CPU %i; %s;",
+		size = asprintf(&temp_str, "%" PRIu64 "; %s-%i; CPU %i; %s;",
 				entry->ts,
 				task,
 				entry->pid,

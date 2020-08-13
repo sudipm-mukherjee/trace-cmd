@@ -7,6 +7,7 @@
 #include <getopt.h>
 #include <errno.h>
 
+#include "tracefs.h"
 #include "trace-local.h"
 
 void trace_check_events(int argc, char **argv)
@@ -28,7 +29,7 @@ void trace_check_events(int argc, char **argv)
 			break;
 		}
 	}
-	tracing = tracecmd_get_tracing_dir();
+	tracing = tracefs_get_tracing_dir();
 
 	if (!tracing) {
 		printf("Can not find or mount tracing directory!\n"
@@ -42,11 +43,12 @@ void trace_check_events(int argc, char **argv)
 	pevent = tep_alloc();
 	if (!pevent)
 		exit(EINVAL);
-	list = tracecmd_load_plugins(pevent);
-	ret = tracecmd_fill_local_events(tracing, pevent, &parsing_failures);
+
+	list = trace_load_plugins(pevent);
+	ret = tracefs_fill_local_events(tracing, pevent, &parsing_failures);
 	if (ret || parsing_failures)
 		ret = EINVAL;
-	tracecmd_unload_plugins(list, pevent);
+	tep_unload_plugins(list, pevent);
 	tep_free(pevent);
 
 	return;

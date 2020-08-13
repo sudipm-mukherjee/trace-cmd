@@ -41,6 +41,8 @@ public:
 
 	void reset();
 
+	bool isEmpty() const;
+
 	/** Reprocess all graphs. */
 	void update() {resizeGL(width(), height());}
 
@@ -61,6 +63,24 @@ public:
 	void loadData(KsDataStore *data);
 
 	void loadColors();
+
+	/**
+	 * Reimplementing the event handler of the focus event, in order to
+	 * avoid the update (redrawing) of the graphs every time when the
+	 * widget grabs the focus of the keyboard. This is done because we do
+	 * not need to redraw, while on the other hand on large data-sets,
+	 * redrawing can take a lot of time.
+	 */
+	void focusInEvent(QFocusEvent* e) override {}
+
+	/**
+	 * Reimplementing the event handler of the focus event, in order to
+	 * avoid the update (redrawing) of the graphs every time when the
+	 * widget releases the focus of the keyboard. This is done because we
+	 * do not need to redraw, while on the other hand on large data-sets,
+	 * redrawing can take a lot of time.
+	 */
+	void focusOutEvent(QFocusEvent* e) override {}
 
 	/**
 	 * Provide the widget with a pointer to the Dual Marker state machine

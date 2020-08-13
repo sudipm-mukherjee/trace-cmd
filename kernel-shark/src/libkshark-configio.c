@@ -310,7 +310,6 @@ bool kshark_config_doc_get(struct kshark_config_doc *conf,
 			if (!get_jval(conf, key, &tmp->conf_doc))
 				goto fail;
 
-			free(val->conf_doc);
 			val->conf_doc =
 				(char *) json_object_get_string(tmp->conf_doc);
 			free(tmp);
@@ -794,7 +793,7 @@ bool kshark_export_event_filter(struct tep_handle *pevent,
 	}
 }
 
-static bool kshark_event_filter_from_json(struct tep_handle *pevent,
+static int kshark_event_filter_from_json(struct tep_handle *pevent,
 					  struct tracecmd_filter_id *filter,
 					  const char *filter_name,
 					  struct json_object *jobj)
@@ -802,7 +801,7 @@ static bool kshark_event_filter_from_json(struct tep_handle *pevent,
 	json_object *jfilter, *jevent, *jsystem, *jname;
 	const char *system_str, *name_str;
 	struct tep_event *event;
-	int i, length;
+	int i, length, count = 0;
 
 	/*
 	 * Use the name of the filter to find the array of events associated
@@ -810,7 +809,7 @@ static bool kshark_event_filter_from_json(struct tep_handle *pevent,
 	 * contain no data for this particular filter.
 	 */
 	if (!json_object_object_get_ex(jobj, filter_name, &jfilter))
-		return false;
+		return 0;
 
 	if (!kshark_json_type_check(jobj, "kshark.config.filter") ||
 	    json_object_get_type(jfilter) != json_type_array)
@@ -830,16 +829,21 @@ static bool kshark_event_filter_from_json(struct tep_handle *pevent,
 
 		event = tep_find_event_by_name(pevent, system_str, name_str);
 		if (!event)
-			goto fail;
+			continue;
 
 		tracecmd_filter_id_add(filter, event->id);
+		++count;
 	}
 
-	return true;
+	if (count != length)
+		count = -count;
+
+	return count;
 
  fail:
 	fprintf(stderr, "Failed to load event filter from json_object.\n");
-	return false;
+	tracecmd_filter_id_clear(filter);
+	return 0;
 }
 
 /**
@@ -852,14 +856,14 @@ static bool kshark_event_filter_from_json(struct tep_handle *pevent,
  * @param conf: Input location for the kshark_config_doc instance. Currently
  *		only Json format is supported.
  *
- * @returns True, if a filter has been loaded. If the filter configuration
- *	    document contains no data for this particular filter or in a case
- *	    of an error, the function returns False.
+ * @returns The total number of events added to the filter. If not all events
+ *	    listed in the input configuration have been added successfully,
+ *	    the returned number is negative.
  */
-bool kshark_import_event_filter(struct tep_handle *pevent,
-				struct tracecmd_filter_id *filter,
-				const char *filter_name,
-				struct kshark_config_doc *conf)
+int kshark_import_event_filter(struct tep_handle *pevent,
+			       struct tracecmd_filter_id *filter,
+			       const char *filter_name,
+			       struct kshark_config_doc *conf)
 {
 	switch (conf->format) {
 	case KS_CONFIG_JSON:
@@ -870,7 +874,7 @@ bool kshark_import_event_filter(struct tep_handle *pevent,
 	default:
 		fprintf(stderr, "Document format %d not supported\n",
 			conf->format);
-		return false;
+		return 0;
 	}
 }
 
@@ -1302,11 +1306,6 @@ bool kshark_import_user_mask(struct kshark_context *kshark_ctx,
 	}
 }
 
-static bool filter_is_set(struct tracecmd_filter_id *filter)
-{
-	return filter && filter->count;
-}
-
 /**
  * @brief Record the current configuration of "show task" and "hide task"
  *	  filters into a Json document.
@@ -1331,13 +1330,13 @@ bool kshark_export_all_event_filters(struct kshark_context *kshark_ctx,
 		return false;
 
 	/* Save a filter only if it contains Id values. */
-	if (filter_is_set(kshark_ctx->show_event_filter))
+	if (kshark_this_filter_is_set(kshark_ctx->show_event_filter))
 		ret &= kshark_export_event_filter(kshark_ctx->pevent,
 						  kshark_ctx->show_event_filter,
 						  KS_SHOW_EVENT_FILTER_NAME,
 						  *conf);
 
-	if (filter_is_set(kshark_ctx->hide_event_filter))
+	if (kshark_this_filter_is_set(kshark_ctx->hide_event_filter))
 		ret &= kshark_export_event_filter(kshark_ctx->pevent,
 						  kshark_ctx->hide_event_filter,
 						  KS_HIDE_EVENT_FILTER_NAME,
@@ -1370,12 +1369,12 @@ bool kshark_export_all_task_filters(struct kshark_context *kshark_ctx,
 		return false;
 
 	/* Save a filter only if it contains Id values. */
-	if (filter_is_set(kshark_ctx->show_task_filter))
+	if (kshark_this_filter_is_set(kshark_ctx->show_task_filter))
 		ret &= kshark_export_filter_array(kshark_ctx->show_task_filter,
 						  KS_SHOW_TASK_FILTER_NAME,
 						  *conf);
 
-	if (filter_is_set(kshark_ctx->hide_task_filter))
+	if (kshark_this_filter_is_set(kshark_ctx->hide_task_filter))
 		ret &= kshark_export_filter_array(kshark_ctx->hide_task_filter,
 						  KS_HIDE_TASK_FILTER_NAME,
 						  *conf);
@@ -1408,12 +1407,12 @@ bool kshark_export_all_cpu_filters(struct kshark_context *kshark_ctx,
 		return false;
 
 	/* Save a filter only if it contains Id values. */
-	if (filter_is_set(kshark_ctx->show_task_filter))
+	if (kshark_this_filter_is_set(kshark_ctx->show_cpu_filter))
 		ret &= kshark_export_filter_array(kshark_ctx->show_cpu_filter,
 						  KS_SHOW_CPU_FILTER_NAME,
 						  *conf);
 
-	if (filter_is_set(kshark_ctx->hide_task_filter))
+	if (kshark_this_filter_is_set(kshark_ctx->hide_cpu_filter))
 		ret &= kshark_export_filter_array(kshark_ctx->hide_cpu_filter,
 						  KS_HIDE_CPU_FILTER_NAME,
 						  *conf);

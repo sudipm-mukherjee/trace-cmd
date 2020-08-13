@@ -16,9 +16,6 @@
 int silence_warnings;
 int show_status;
 
-int debug;
-int quiet;
-
 void warning(const char *fmt, ...)
 {
 	va_list ap;
@@ -83,12 +80,17 @@ struct command commands[] = {
 	{"hist", trace_hist},
 	{"mem", trace_mem},
 	{"listen", trace_listen},
+#ifdef VSOCK
+	{"agent", trace_agent},
+	{"setup-guest", trace_setup_guest},
+#endif
 	{"split", trace_split},
 	{"restore", trace_restore},
 	{"stack", trace_stack},
 	{"check-events", trace_check_events},
 	{"record", trace_record},
 	{"start", trace_start},
+	{"set", trace_set},
 	{"extract", trace_extract},
 	{"stop", trace_stop},
 	{"stream", trace_stream},
@@ -101,6 +103,7 @@ struct command commands[] = {
 	{"show", trace_show},
 	{"list", trace_list},
 	{"help", trace_usage},
+	{"dump", trace_dump},
 	{"-h", trace_usage},
 };
 

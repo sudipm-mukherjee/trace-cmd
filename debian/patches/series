@@ -1,6 +1,0 @@
-0001-kernel-shark-Have-make-clean-run-cmake-clean.sh.patch
-0002-tools-lib-traceevent-Fix-buffer-overflow-in-arg_eval.patch
-0003-kernel-shark-Initialize-all-fields-of-struct-kshark_.patch
-0001-trace-cmd-Fix-multiple-definition-compiler-errors.patch
-0002-trace-cmd-Fix-build-with-gcc-10.patch
-0003-kernelshark-Make-fontHeight-and-stringWidth-static.patch

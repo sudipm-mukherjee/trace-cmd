@@ -1,0 +1,18 @@
+Description: Use libdl to build unittests
+
+Author: Sudip Mukherjee <sudipm.mukherjee@gmail.com>
+Forwarded: no
+
+---
+
+--- trace-cmd-2.9.1.orig/utest/Makefile
++++ trace-cmd-2.9.1/utest/Makefile
+@@ -11,7 +11,7 @@ OBJS += tracefs-utest.o
+ 
+ LIBS += -lcunit				\
+ 	-L$(LIBTRACEFS_DIR) -ltracefs	\
+-	-L$(LIBTRACEEVENT_DIR) -ltraceevent
++	-L$(LIBTRACEEVENT_DIR) -ltraceevent -ldl
+ 
+ OBJS := $(OBJS:%.o=$(bdir)/%.o)
+ DEPS := $(OBJS:$(bdir)/%.o=$(bdir)/.%.d)

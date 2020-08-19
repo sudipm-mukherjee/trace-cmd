@@ -1,3 +1,10 @@
+trace-cmd (2.9.1-1) unstable; urgency=medium
+
+  * Update to upstream v2.9.1
+    - New version has updated manpages. (LP: #1868900)
+
+ -- Sudip Mukherjee <sudipm.mukherjee@gmail.com>  Wed, 19 Aug 2020 20:51:17 +0100
+
 trace-cmd (2.8.3-7) unstable; urgency=medium
 
   * Update compat level to 13.

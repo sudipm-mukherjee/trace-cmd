@@ -16,7 +16,9 @@ override_dh_auto_build:
 	dh_auto_configure --sourcedirectory=kernel-shark --builddirectory=kernel-shark/build -- -D_INSTALL_PREFIX=/usr
 	$(MAKE) gui $(OPTS)
 	$(MAKE) doc $(OPTS)
+	$(MAKE) doc_gui $(OPTS)
 override_dh_auto_install:
 	$(MAKE) install $(OPTS)
 	$(MAKE) install_gui $(OPTS)
 	$(MAKE) install_doc $(OPTS)
+	$(MAKE) install_doc_gui $(OPTS)

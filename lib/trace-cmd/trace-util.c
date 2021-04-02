@@ -21,17 +21,67 @@
 #include <sys/sysinfo.h>
 #include <time.h>
 
-#include "trace-cmd.h"
+#include "trace-cmd-private.h"
 #include "event-utils.h"
 
 #define LOCAL_PLUGIN_DIR ".trace-cmd/plugins"
 #define PROC_STACK_FILE "/proc/sys/kernel/stack_tracer_enabled"
 
-int tracecmd_disable_sys_plugins;
-int tracecmd_disable_plugins;
 static bool debug;
 
 static FILE *logfp;
+
+const static struct {
+	const char *clock_str;
+	enum tracecmd_clocks clock_id;
+} trace_clocks[] = {
+	{"local", TRACECMD_CLOCK_LOCAL},
+	{"global", TRACECMD_CLOCK_GLOBAL},
+	{"counter", TRACECMD_CLOCK_COUNTER},
+	{"uptime", TRACECMD_CLOCK_UPTIME},
+	{"perf", TRACECMD_CLOCK_PERF},
+	{"mono", TRACECMD_CLOCK_MONO},
+	{"mono_raw", TRACECMD_CLOCK_MONO_RAW},
+	{"boot", TRACECMD_CLOCK_BOOT},
+	{"x86-tsc", TRACECMD_CLOCK_X86_TSC},
+	{NULL, -1}
+};
+
+/**
+ * tracecmd_clock_str2id - Convert ftrace clock name to clock ID
+ * @clock: Ftrace clock name
+ * Returns ID of the ftrace clock
+ */
+enum tracecmd_clocks tracecmd_clock_str2id(const char *clock)
+{
+	int i;
+
+	if (!clock)
+		return TRACECMD_CLOCK_UNKNOWN;
+
+	for (i = 0; trace_clocks[i].clock_str; i++) {
+		if (!strncmp(clock, trace_clocks[i].clock_str,
+		    strlen(trace_clocks[i].clock_str)))
+			return trace_clocks[i].clock_id;
+	}
+	return TRACECMD_CLOCK_UNKNOWN;
+}
+
+/**
+ * tracecmd_clock_id2str - Convert clock ID to ftare clock name
+ * @clock: Clock ID
+ * Returns name of a ftrace clock
+ */
+const char *tracecmd_clock_id2str(enum tracecmd_clocks clock)
+{
+	int i;
+
+	for (i = 0; trace_clocks[i].clock_str; i++) {
+		if (trace_clocks[i].clock_id == clock)
+			return trace_clocks[i].clock_str;
+	}
+	return NULL;
+}
 
 /**
  * tracecmd_set_debug - Set debug mode of the tracecmd library
@@ -63,7 +113,7 @@ void tracecmd_parse_cmdlines(struct tep_handle *pevent,
 
 	line = strtok_r(file, "\n", &next);
 	while (line) {
-		sscanf(line, "%d %ms", &pid, &comm);
+		sscanf(line, "%d %m[^\n]s", &pid, &comm);
 		tep_register_comm(pevent, comm, pid);
 		free(comm);
 		line = strtok_r(NULL, "\n", &next);
@@ -283,14 +333,14 @@ static char *get_source_plugins_dir(void)
 }
 
 struct tep_plugin_list*
-trace_load_plugins(struct tep_handle *tep)
+trace_load_plugins(struct tep_handle *tep, int flags)
 {
 	struct tep_plugin_list *list;
 	char *path;
 
-	if (tracecmd_disable_plugins)
+	if (flags & TRACECMD_FL_LOAD_NO_PLUGINS)
 		tep_set_flag(tep, TEP_DISABLE_PLUGINS);
-	if (tracecmd_disable_sys_plugins)
+	if (flags & TRACECMD_FL_LOAD_NO_SYSTEM_PLUGINS)
 		tep_set_flag(tep, TEP_DISABLE_SYS_PLUGINS);
 
 	path = get_source_plugins_dir();

@@ -2,13 +2,23 @@
 # trace-cmd version
 TC_VERSION = 2
 TC_PATCHLEVEL = 9
-TC_EXTRAVERSION = 1
+TC_EXTRAVERSION = 2
 TRACECMD_VERSION = $(TC_VERSION).$(TC_PATCHLEVEL).$(TC_EXTRAVERSION)
 
 export TC_VERSION
 export TC_PATCHLEVEL
 export TC_EXTRAVERSION
 export TRACECMD_VERSION
+
+LIBTC_VERSION = 0
+LIBTC_PATCHLEVEL = 0
+LIBTC_EXTRAVERSION = 1
+LIBTRACECMD_VERSION = $(LIBTC_VERSION).$(LIBTC_PATCHLEVEL).$(LIBTC_EXTRAVERSION)
+
+export LIBTC_VERSION
+export LIBTC_PATCHLEVEL
+export LIBTC_EXTRAVERSION
+export LIBTRACECMD_VERSION
 
 MAKEFLAGS += --no-print-directory
 
@@ -26,6 +36,11 @@ endef
 # Allow setting CC and AR, or setting CROSS_COMPILE as a prefix.
 $(call allow-override,CC,$(CROSS_COMPILE)gcc)
 $(call allow-override,AR,$(CROSS_COMPILE)ar)
+$(call allow-override,PKG_CONFIG,pkg-config)
+$(call allow-override,LD_SO_CONF_PATH,/etc/ld.so.conf.d/)
+$(call allow-override,LDCONFIG,ldconfig)
+
+export LD_SO_CONF_PATH LDCONFIG
 
 EXT = -std=gnu99
 INSTALL = install
@@ -37,6 +52,14 @@ INSTALL = install
 DESTDIR ?=
 DESTDIR_SQ = '$(subst ','\'',$(DESTDIR))'
 
+LP64 := $(shell echo __LP64__ | ${CC} ${CFLAGS} -E -x c - | tail -n 1)
+ifeq ($(LP64), 1)
+  libdir_relative_temp = lib64
+else
+  libdir_relative_temp = lib
+endif
+
+libdir_relative ?= $(libdir_relative_temp)
 prefix ?= /usr/local
 bindir_relative = bin
 bindir = $(prefix)/$(bindir_relative)
@@ -46,20 +69,18 @@ html_install = $(prefix)/share/kernelshark/html
 html_install_SQ = '$(subst ','\'',$(html_install))'
 img_install = $(prefix)/share/kernelshark/html/images
 img_install_SQ = '$(subst ','\'',$(img_install))'
-libdir ?= $(prefix)/lib
+libdir = $(prefix)/$(libdir_relative)
 libdir_SQ = '$(subst ','\'',$(libdir))'
 includedir = $(prefix)/include
 includedir_SQ = '$(subst ','\'',$(includedir))'
+pkgconfig_dir ?= $(word 1,$(shell $(PKG_CONFIG) 		\
+			--variable pc_path pkg-config | tr ":" " "))
 
-ifeq ($(prefix),/usr/local)
 etcdir ?= /etc
-else
-etcdir ?= $(prefix)/etc
-endif
 etcdir_SQ = '$(subst ','\'',$(etcdir))'
 
 export man_dir man_dir_SQ html_install html_install_SQ INSTALL
-export img_install img_install_SQ
+export img_install img_install_SQ libdir libdir_SQ includedir_SQ
 export DESTDIR DESTDIR_SQ
 
 ifeq ($(prefix),$(HOME))
@@ -97,8 +118,6 @@ HELP_DIR_SQ = '$(subst ','\'',$(HELP_DIR))'
 #' emacs highlighting gets confused by the above escaped quote.
 
 BASH_COMPLETE_DIR ?= $(etcdir)/bash_completion.d
-LD_SO_CONF_DIR ?= $(etcdir)/ld.so.conf.d
-TRACE_LD_FILE ?= trace.conf
 
 export PLUGIN_DIR_TRACEEVENT
 export PLUGIN_DIR_TRACECMD
@@ -133,7 +152,7 @@ PYTHON_VERS ?= python
 PYTHON_PKGCONFIG_VERS ?= $(PYTHON_VERS)
 
 # Can build python?
-ifeq ($(shell sh -c "pkg-config --cflags $(PYTHON_PKGCONFIG_VERS) > /dev/null 2>&1 && echo y"), y)
+ifeq ($(shell sh -c "$(PKG_CONFIG) --cflags $(PYTHON_PKGCONFIG_VERS) > /dev/null 2>&1 && echo y"), y)
 	BUILD_PYTHON := $(PYTHON)
 	BUILD_PYTHON_WORKS := 1
 else
@@ -185,48 +204,85 @@ objtree		:= $(BUILD_OUTPUT)
 src		:= $(srctree)
 obj		:= $(objtree)
 
+PKG_CONFIG_SOURCE_FILE = libtracecmd.pc
+PKG_CONFIG_FILE := $(addprefix $(BUILD_OUTPUT)/,$(PKG_CONFIG_SOURCE_FILE))
+
+export pkgconfig_dir PKG_CONFIG_FILE
+
 kshark-dir	= $(src)/kernel-shark
 
 export prefix bindir src obj kshark-dir
 
 LIBS = -ldl
 
-LIBTRACEEVENT_DIR = $(obj)/lib/traceevent
-LIBTRACEEVENT_STATIC = $(LIBTRACEEVENT_DIR)/libtraceevent.a
-LIBTRACEEVENT_SHARED = $(LIBTRACEEVENT_DIR)/libtraceevent.so
-
 LIBTRACECMD_DIR = $(obj)/lib/trace-cmd
 LIBTRACECMD_STATIC = $(LIBTRACECMD_DIR)/libtracecmd.a
-LIBTRACECMD_SHARED = $(LIBTRACECMD_DIR)/libtracecmd.so
+LIBTRACECMD_SHARED = $(LIBTRACECMD_DIR)/libtracecmd.so.$(LIBTRACECMD_VERSION)
+LIBTRACECMD_SHARED_VERSION = $(shell echo $(LIBTRACECMD_SHARED) | sed -e 's/\(\.so\.[0-9]*\).*/\1/')
+LIBTRACECMD_SHARED_SO = $(shell echo $(LIBTRACECMD_SHARED) | sed -e 's/\(\.so\).*/\1/')
 
+export LIBTRACECMD_STATIC LIBTRACECMD_SHARED
+export LIBTRACECMD_SHARED_VERSION LIBTRACECMD_SHARED_SO
+
+LIBTRACEEVENT=libtraceevent
+LIBTRACEEVENT_DIR = $(obj)/lib/traceevent
+LIBTRACEEVENT_STATIC = $(LIBTRACEEVENT_DIR)/libtraceevent.a
+
+LIBTRACEFS=libtracefs
 LIBTRACEFS_DIR = $(obj)/lib/tracefs
 LIBTRACEFS_STATIC = $(LIBTRACEFS_DIR)/libtracefs.a
-LIBTRACEFS_SHARED = $(LIBTRACEFS_DIR)/libtracefs.so
 
-TRACE_LIBS = -L$(LIBTRACECMD_DIR) -ltracecmd		\
-	     -L$(LIBTRACEEVENT_DIR) -ltraceevent	\
-	     -L$(LIBTRACEFS_DIR) -ltracefs
+# In the special case (debugging), that the local versions of the
+# libraries need to be built, adding "LOCAL_LIBS=1" to the make
+# command line will skip the check if they are installed.
+ifneq ("$(origin LOCAL_LIBS)", "command line")
+TEST_LIBTRACEEVENT = $(shell sh -c "$(PKG_CONFIG) --cflags $(LIBTRACEEVENT) > /dev/null 2>&1 && echo y")
+TEST_LIBTRACEFS = $(shell sh -c "$(PKG_CONFIG) --cflags $(LIBTRACEFS) > /dev/null 2>&1 && echo y")
+endif
+
+ifeq ("$(TEST_LIBTRACEEVENT)", "y")
+LIBTRACEEVENT_CFLAGS = $(shell sh -c "$(PKG_CONFIG) --cflags $(LIBTRACEEVENT)")
+LIBTRACEEVENT_LDLAGS = $(shell sh -c "$(PKG_CONFIG) --libs $(LIBTRACEEVENT)")
+TRACEEVENT_PLUGINS =
+TRACEEVENT_PLUGINS_INSTALL =
+else
+LIBTRACEEVENT_CFLAGS = -I$(src)/include/traceevent -I$(src)/lib/traceevent/include
+LIBTRACEEVENT_LDLAGS = -L$(LIBTRACEEVENT_DIR) -ltraceevent
+LIBTRACEEVENT_STATIC_BUILD = $(LIBTRACEEVENT_STATIC)
+TRACEEVENT_PLUGINS = plugins_traceevent
+TRACEEVENT_PLUGINS_INSTALL = install_plugins_traceevent
+endif
+
+export LIBTRACEEVENT_CFLAGS LIBTRACEEVENT_LDLAGS
+
+ifeq ("$(TEST_LIBTRACEFS)", "y")
+LIBTRACEFS_CFLAGS = $(shell sh -c "$(PKG_CONFIG) --cflags $(LIBTRACEFS)")
+LIBTRACEFS_LDLAGS = $(shell sh -c "$(PKG_CONFIG) --libs $(LIBTRACEFS)")
+else
+LIBTRACEFS_CFLAGS = -I$(src)/include/tracefs
+LIBTRACEFS_LDLAGS = -L$(LIBTRACEFS_DIR) -ltracefs
+LIBTRACEFS_STATIC_BUILD = $(LIBTRACEFS_STATIC)
+endif
+
+export LIBTRACEFS_CFLAGS LIBTRACEFS_LDLAGS
+
+TRACE_LIBS = -L$(LIBTRACECMD_DIR) -ltracecmd	\
+	     $(LIBTRACEEVENT_LDLAGS) $(LIBTRACEFS_LDLAGS)
 
 export LIBS TRACE_LIBS
 export LIBTRACEEVENT_DIR LIBTRACECMD_DIR LIBTRACEFS_DIR
-export LIBTRACECMD_STATIC LIBTRACECMD_SHARED
-export LIBTRACEEVENT_STATIC LIBTRACEEVENT_SHARED
-export LIBTRACEFS_STATIC LIBTRACEFS_SHARED
-
 export Q SILENT VERBOSE EXT
 
 # Include the utils
 include scripts/utils.mk
 
 INCLUDES = -I$(src)/include -I$(src)/../../include
-INCLUDES += -I$(src)/include/traceevent
 INCLUDES += -I$(src)/include/trace-cmd
-INCLUDES += -I$(src)/include/tracefs
-INCLUDES += -I$(src)/lib/traceevent/include
 INCLUDES += -I$(src)/lib/trace-cmd/include
-INCLUDES += -I$(src)/lib/tracefs/include
+INCLUDES += -I$(src)/lib/trace-cmd/include/private
 INCLUDES += -I$(src)/tracecmd/include
-INCLUDES += -I$(obj)/tracecmd/include
+INCLUDES += $(LIBTRACEEVENT_CFLAGS)
+INCLUDES += $(LIBTRACEFS_CFLAGS)
 
 include $(src)/features.mk
 
@@ -242,7 +298,7 @@ ifeq ($(VSOCK_DEFINED), 1)
 CFLAGS += -DVSOCK
 endif
 
-CUNIT_INSTALLED := $(shell if (printf "$(pound)include <CUnit/Basic.h>\n void main(){CU_initialize_registry();}" | $(CC) -x c - -lcunit >/dev/null 2>&1) ; then echo 1; else echo 0 ; fi)
+CUNIT_INSTALLED := $(shell if (printf "$(pound)include <CUnit/Basic.h>\n void main(){CU_initialize_registry();}" | $(CC) -o /dev/null -x c - -lcunit >/dev/null 2>&1) ; then echo 1; else echo 0 ; fi)
 export CUNIT_INSTALLED
 
 export CFLAGS
@@ -287,6 +343,7 @@ CMD_TARGETS = trace-cmd $(BUILD_PYTHON)
 #    Default we just build trace-cmd
 #
 #    If you want kernelshark, then do:  make gui
+#    If you want all libraries, then do: make libs
 ###
 
 all: all_cmd plugins show_gui_make
@@ -298,48 +355,57 @@ CMAKE_COMMAND = /usr/bin/cmake
 # Build with "BUILD_TYPE=Release" to remove cmake debug info
 BUILD_TYPE ?= RelWithDebInfo
 
+BUILD_PREFIX := $(BUILD_OUTPUT)/build_prefix
+
+$(BUILD_PREFIX): force
+	$(Q)$(call build_prefix,$(prefix))
+
+$(PKG_CONFIG_FILE) : ${PKG_CONFIG_SOURCE_FILE}.template $(BUILD_PREFIX)
+	$(Q) $(call do_make_pkgconfig_file,$(prefix))
+
 $(kshark-dir)/build/Makefile: $(kshark-dir)/CMakeLists.txt
 	$(Q) cd $(kshark-dir)/build && $(CMAKE_COMMAND) -DCMAKE_BUILD_TYPE=$(BUILD_TYPE) -D_INSTALL_PREFIX=$(prefix) -D_LIBDIR=$(libdir) ..
 
-gui: force $(CMD_TARGETS) $(kshark-dir)/build/Makefile
-	$(Q)$(MAKE) $(S) -C $(kshark-dir)/build
-	@echo "gui build complete"
-	@echo "  kernelshark located at $(kshark-dir)/bin"
-
-trace-cmd: force $(LIBTRACEEVENT_STATIC) $(LIBTRACECMD_STATIC) $(LIBTRACEFS_STATIC) \
+trace-cmd: force $(LIBTRACEEVENT_STATIC_BUILD) $(LIBTRACECMD_STATIC) $(LIBTRACEFS_STATIC_BUILD) \
 	force $(obj)/lib/trace-cmd/plugins/tracecmd_plugin_dir
 	$(Q)$(MAKE) -C $(src)/tracecmd $(obj)/tracecmd/$@
 
-$(LIBTRACEEVENT_SHARED): force $(obj)/lib/traceevent/plugins/trace_python_dir \
+LIBTRACEEVENT_DEPENDS = $(obj)/lib/traceevent/plugins/trace_python_dir \
 			 $(obj)/lib/traceevent/plugins/traceevent_plugin_dir
-	$(Q)$(MAKE) -C $(src)/lib/traceevent $@
 
-$(LIBTRACEEVENT_STATIC): force $(obj)/lib/traceevent/plugins/trace_python_dir \
-			 $(obj)/lib/traceevent/plugins/traceevent_plugin_dir
-	$(Q)$(MAKE) -C $(src)/lib/traceevent $@
+$(LIBTRACEEVENT_STATIC): force $(LIBTRACEEVENT_DEPENDS)
+	$(Q)$(MAKE) -C $(src)/lib/traceevent libtraceevent
 
 $(LIBTRACECMD_STATIC): force
 	$(Q)$(MAKE) -C $(src)/lib/trace-cmd $@
 
-$(LIBTRACECMD_SHARED): force $(LIBTRACEEVENT_SHARED)
-	$(Q)$(MAKE) -C $(src)/lib/trace-cmd $@
+$(LIBTRACECMD_SHARED): force $(LIBTRACEEVENT_SHARED_BUILD)
+	$(Q)$(MAKE) -C $(src)/lib/trace-cmd libtracecmd.so
 
 $(LIBTRACEFS_STATIC): force
-	$(Q)$(MAKE) -C $(src)/lib/tracefs $@
+	$(Q)$(MAKE) -C $(src)/lib/tracefs libtracefs
 
-$(LIBTRACEFS_SHARED): force
-	$(Q)$(MAKE) -C $(src)/lib/tracefs $@
-
-libtraceevent.so: $(LIBTRACEEVENT_SHARED)
 libtraceevent.a: $(LIBTRACEEVENT_STATIC)
 libtracecmd.a: $(LIBTRACECMD_STATIC)
 libtracecmd.so: $(LIBTRACECMD_SHARED)
 libtracefs.a: $(LIBTRACEFS_STATIC)
-libtracefs.so: $(LIBTRACEFS_SHARED)
 
-libs: $(LIBTRACECMD_SHARED) $(LIBTRACEEVENT_SHARED) $(LIBTRACEFS_SHARED)
+libs: $(LIBTRACECMD_SHARED) $(LIBTRACEEVENT_STATIC_BUILD) $(LIBTRACEFS_STATIC_BUILD) $(PKG_CONFIG_FILE)
 
-test: force $(LIBTRACEEVENT_STATIC) $(LIBTRACEFS_STATIC) $(LIBTRACECMD_STATIC)
+libtraceevent_nowarn: $(LIBTRACEEVENT_DEPENDS)
+	$(Q)$(MAKE) -C $(src)/lib/traceevent $@
+
+libtracefs_nowarn: force
+	$(Q)$(MAKE) -C $(src)/lib/tracefs $@
+
+
+gui: force $(CMD_TARGETS) libtraceevent_nowarn libtracefs_nowarn
+	$(MAKE) $(kshark-dir)/build/Makefile
+	$(Q)$(MAKE) $(S) -C $(kshark-dir)/build
+	@echo "gui build complete"
+	@echo "  kernelshark located at $(kshark-dir)/bin"
+
+test: force $(LIBTRACEEVENT_STATIC_BUILD) $(LIBTRACEFS_STATIC_BUILD) $(LIBTRACECMD_STATIC)
 ifneq ($(CUNIT_INSTALLED),1)
 	$(error CUnit framework not installed, cannot build unit tests))
 endif
@@ -352,7 +418,7 @@ plugins_traceevent: force $(obj)/lib/traceevent/plugins/traceevent_plugin_dir \
 plugins_tracecmd: force $(obj)/lib/trace-cmd/plugins/tracecmd_plugin_dir
 	$(Q)$(MAKE) -C $(src)/lib/trace-cmd/plugins
 
-plugins: plugins_traceevent plugins_tracecmd
+plugins: $(TRACEEVENT_PLUGINS) plugins_tracecmd
 
 $(obj)/lib/traceevent/plugins/traceevent_plugin_dir: force
 	$(Q)$(MAKE) -C $(src)/lib/traceevent/plugins $@
@@ -392,7 +458,7 @@ install_plugins_traceevent: force
 install_plugins_tracecmd: force
 	$(Q)$(MAKE) -C $(src)/lib/trace-cmd/plugins install_plugins
 
-install_plugins: install_plugins_traceevent install_plugins_tracecmd
+install_plugins: $(TRACEEVENT_PLUGINS_INSTALL) install_plugins_tracecmd
 
 install_python: force
 	$(Q)$(MAKE) -C $(src)/python $@
@@ -411,17 +477,7 @@ install_gui: install_cmd gui
 	$(Q)$(MAKE) $(S) -C $(kshark-dir)/build install
 
 install_libs: libs
-	$(Q)$(call do_install,$(LIBTRACECMD_SHARED),$(libdir_SQ)/trace-cmd)
-	$(Q)$(call do_install,$(LIBTRACEEVENT_SHARED),$(libdir_SQ)/traceevent)
-	$(Q)$(call do_install,$(LIBTRACEFS_SHARED),$(libdir_SQ)/tracefs)
-	$(Q)$(call do_install,$(src)/include/traceevent/event-parse.h,$(includedir_SQ)/traceevent)
-	$(Q)$(call do_install,$(src)/include/traceevent/trace-seq.h,$(includedir_SQ)/traceevent)
-	$(Q)$(call do_install,$(src)/include/trace-cmd/trace-cmd.h,$(includedir_SQ)/trace-cmd)
-	$(Q)$(call do_install,$(src)/include/trace-cmd/trace-filter-hash.h,$(includedir_SQ)/trace-cmd)
-	$(Q)$(call do_install,$(src)/include/tracefs/tracefs.h,$(includedir_SQ)/tracefs)
-	$(Q)$(call do_install_ld,$(TRACE_LD_FILE),$(LD_SO_CONF_DIR),$(libdir_SQ)/trace-cmd)
-	$(Q)$(call do_install_ld,$(TRACE_LD_FILE),$(LD_SO_CONF_DIR),$(libdir_SQ)/traceevent)
-	$(Q)$(call do_install_ld,$(TRACE_LD_FILE),$(LD_SO_CONF_DIR),$(libdir_SQ)/tracefs)
+	$(Q)$(MAKE) -C $(src)/lib/trace-cmd/ $@
 
 doc:
 	$(MAKE) -C $(src)/Documentation all
@@ -441,7 +497,7 @@ install_doc_gui:
 
 clean:
 	$(RM) *.o *~ *.a *.so .*.d
-	$(RM) tags TAGS cscope*
+	$(RM) tags TAGS cscope* $(PKG_CONFIG_SOURCE_FILE)
 	$(MAKE) -C $(src)/lib/traceevent clean
 	$(MAKE) -C $(src)/lib/trace-cmd clean
 	$(MAKE) -C $(src)/lib/tracefs clean
@@ -453,6 +509,34 @@ clean:
 	if [ -f $(kshark-dir)/build/Makefile ]; then $(MAKE) -C $(kshark-dir)/build clean; fi
 	cd $(kshark-dir)/build; ./cmake_clean.sh
 
+define build_uninstall_script
+	$(Q)mkdir $(BUILD_OUTPUT)/tmp_build
+	$(Q)$(MAKE) -C $(src) DESTDIR=$(BUILD_OUTPUT)/tmp_build O=$(BUILD_OUTPUT) $1 > /dev/null
+	$(Q)find $(BUILD_OUTPUT)/tmp_build ! -type d -printf "%P\n" > $(BUILD_OUTPUT)/build_$2
+	$(Q)$(RM) -rf $(BUILD_OUTPUT)/tmp_build
+endef
+
+build_uninstall: $(BUILD_PREFIX)
+	$(call build_uninstall_script,install,uninstall)
+
+$(BUILD_OUTPUT)/build_uninstall: build_uninstall
+
+build_libs_uninstall: $(BUILD_PREFIX)
+	$(call build_uninstall_script,install_libs,libs_uninstall)
+
+$(BUILD_OUTPUT)/build_libs_uninstall: build_libs_uninstall
+
+define uninstall_file
+	if [ -f $(DESTDIR)/$1 -o -h $(DESTDIR)/$1 ]; then \
+		$(call print_uninstall,$(DESTDIR)/$1)$(RM) $(DESTDIR)/$1; \
+	fi;
+endef
+
+uninstall: $(BUILD_OUTPUT)/build_uninstall
+	@$(foreach file,$(shell cat $(BUILD_OUTPUT)/build_uninstall),$(call uninstall_file,$(file)))
+
+uninstall_libs: $(BUILD_OUTPUT)/build_libs_uninstall
+	@$(foreach file,$(shell cat $(BUILD_OUTPUT)/build_libs_uninstall),$(call uninstall_file,$(file)))
 
 ##### PYTHON STUFF #####
 
@@ -467,10 +551,10 @@ report_nopythondev: force
 	$(Q)echo
 
 ifndef NO_PYTHON
-PYTHON_INCLUDES = `pkg-config --cflags $(PYTHON_PKGCONFIG_VERS)`
-PYTHON_LDFLAGS = `pkg-config --libs $(PYTHON_PKGCONFIG_VERS)` \
+PYTHON_INCLUDES = `$(PKG_CONFIG) --cflags $(PYTHON_PKGCONFIG_VERS)`
+PYTHON_LDFLAGS = `$(PKG_CONFIG) --libs $(PYTHON_PKGCONFIG_VERS)` \
 		$(shell $(PYTHON_VERS)-config --ldflags)
-PYGTK_CFLAGS = `pkg-config --cflags pygtk-2.0`
+PYGTK_CFLAGS = `$(PKG_CONFIG) --cflags pygtk-2.0`
 else
 PYTHON_INCLUDES =
 PYTHON_LDFLAGS =

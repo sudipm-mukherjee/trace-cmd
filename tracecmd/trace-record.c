@@ -351,27 +351,37 @@ static void test_set_event_pid(struct buffer_instance *instance)
 }
 
 /**
- * create_instance - allocate a new buffer instance
+ * allocate_instance - allocate a new buffer instance,
+ *			it must exist in the ftrace system
  * @name: The name of the instance (instance will point to this)
  *
- * Returns a newly allocated instance. Note that @name will not be
- * copied, and the instance buffer will point to the string itself.
+ * Returns a newly allocated instance. In case of an error or if the
+ * instance does not exist in the ftrace system, NULL is returned.
  */
-struct buffer_instance *create_instance(const char *name)
+struct buffer_instance *allocate_instance(const char *name)
 {
 	struct buffer_instance *instance;
 
-	instance = malloc(sizeof(*instance));
+	instance = calloc(1, sizeof(*instance));
 	if (!instance)
 		return NULL;
-	memset(instance, 0, sizeof(*instance));
-	instance->tracefs = tracefs_instance_alloc(name);
-	if (!instance->tracefs) {
-		free(instance);
-		return NULL;
+	if (name)
+		instance->name = strdup(name);
+	if (tracefs_instance_exists(name)) {
+		instance->tracefs = tracefs_instance_create(name);
+		if (!instance->tracefs)
+			goto error;
 	}
 
 	return instance;
+
+error:
+	if (instance) {
+		free(instance->name);
+		tracefs_instance_free(instance->tracefs);
+		free(instance);
+	}
+	return NULL;
 }
 
 static int __add_all_instances(const char *tracing_dir)
@@ -418,7 +428,7 @@ static int __add_all_instances(const char *tracing_dir)
 		}
 		free(instance_path);
 
-		instance = create_instance(name);
+		instance = allocate_instance(name);
 		if (!instance)
 			die("Failed to create instance");
 		add_instance(instance, local_cpu_count);
@@ -440,13 +450,11 @@ static int __add_all_instances(const char *tracing_dir)
  */
 void add_all_instances(void)
 {
-	char *tracing_dir = tracefs_find_tracing_dir();
+	const char *tracing_dir = tracefs_tracing_dir();
 	if (!tracing_dir)
-		die("malloc");
+		die("can't get the tracing directory");
 
 	__add_all_instances(tracing_dir);
-
-	tracefs_put_tracing_file(tracing_dir);
 }
 
 /**
@@ -657,7 +665,28 @@ static void delete_thread_data(void)
 	}
 }
 
-#ifdef VSOCK
+static void host_tsync_complete(struct buffer_instance *instance)
+{
+	struct tracecmd_output *handle = NULL;
+	int fd = -1;
+	int ret;
+
+	ret = tracecmd_tsync_with_guest_stop(instance->tsync);
+	if (!ret) {
+		fd = open(instance->output_file, O_RDWR);
+		if (fd < 0)
+			die("error opening %s", instance->output_file);
+		handle = tracecmd_get_output_handle_fd(fd);
+		if (!handle)
+			die("cannot create output handle");
+		tracecmd_write_guest_time_shift(handle, instance->tsync);
+		tracecmd_output_close(handle);
+	}
+
+	tracecmd_tsync_free(instance->tsync);
+	instance->tsync = NULL;
+}
+
 static void tell_guests_to_stop(void)
 {
 	struct buffer_instance *instance;
@@ -670,7 +699,7 @@ static void tell_guests_to_stop(void)
 
 	for_all_instances(instance) {
 		if (is_guest(instance))
-			tracecmd_host_tsync_complete(instance);
+			host_tsync_complete(instance);
 	}
 
 	/* Wait for guests to acknowledge */
@@ -681,11 +710,6 @@ static void tell_guests_to_stop(void)
 		}
 	}
 }
-#else
-static inline void tell_guests_to_stop(void)
-{
-}
-#endif
 
 static void stop_threads(enum trace_type type)
 {
@@ -833,21 +857,6 @@ static void clear_trace_instances(void)
 
 	for_all_instances(instance)
 		__clear_trace(instance);
-}
-
-static void clear_trace(void)
-{
-	FILE *fp;
-	char *path;
-
-	/* reset the trace */
-	path = tracefs_get_tracing_file("trace");
-	fp = fopen(path, "w");
-	if (!fp)
-		die("writing to '%s'", path);
-	tracefs_put_tracing_file(path);
-	fwrite("0", 1, 1, fp);
-	fclose(fp);
 }
 
 static void reset_max_latency(struct buffer_instance *instance)
@@ -1317,8 +1326,13 @@ out:
 	free(pidfds);
 	return ret;
 }
-#ifndef NO_PTRACE
 
+static void add_event_pid(struct buffer_instance *instance, const char *buf)
+{
+	tracefs_instance_file_write(instance->tracefs, "set_event_pid", buf);
+}
+
+#ifndef NO_PTRACE
 /**
  * append_pid_filter - add a new pid to an existing filter
  * @curr_filter: the filter to append to. If NULL, then allocate one
@@ -1373,11 +1387,6 @@ static void update_sched_events(struct buffer_instance *instance, int pid)
 
 static int open_instance_fd(struct buffer_instance *instance,
 			    const char *file, int flags);
-
-static void add_event_pid(struct buffer_instance *instance, const char *buf)
-{
-	tracefs_instance_file_write(instance->tracefs, "set_event_pid", buf);
-}
 
 static void add_new_filter_child_pid(int pid, int child)
 {
@@ -1644,16 +1653,17 @@ static void run_cmd(enum trace_type type, const char *user, int argc, char **arg
 static void
 set_plugin_instance(struct buffer_instance *instance, const char *name)
 {
-	FILE *fp;
 	char *path;
 	char zero = '0';
+	int ret;
+	int fd;
 
 	if (is_guest(instance))
 		return;
 
 	path = tracefs_instance_get_file(instance->tracefs, "current_tracer");
-	fp = fopen(path, "w");
-	if (!fp) {
+	fd = open(path, O_WRONLY);
+	if (fd < 0) {
 		/*
 		 * Legacy kernels do not have current_tracer file, and they
 		 * always use nop. So, it doesn't need to try to change the
@@ -1663,12 +1673,15 @@ set_plugin_instance(struct buffer_instance *instance, const char *name)
 			tracefs_put_tracing_file(path);
 			return;
 		}
-		die("writing to '%s'", path);
+		die("Opening '%s'", path);
 	}
-	tracefs_put_tracing_file(path);
+	ret = write(fd, name, strlen(name));
+	close(fd);
 
-	fwrite(name, 1, strlen(name), fp);
-	fclose(fp);
+	if (ret < 0)
+		die("writing to '%s'", path);
+
+	tracefs_put_tracing_file(path);
 
 	if (strncmp(name, "function", 8) != 0)
 		return;
@@ -1676,12 +1689,12 @@ set_plugin_instance(struct buffer_instance *instance, const char *name)
 	/* Make sure func_stack_trace option is disabled */
 	/* First try instance file, then top level */
 	path = tracefs_instance_get_file(instance->tracefs, "options/func_stack_trace");
-	fp = fopen(path, "w");
-	if (!fp) {
+	fd = open(path, O_WRONLY);
+	if (fd < 0) {
 		tracefs_put_tracing_file(path);
 		path = tracefs_get_tracing_file("options/func_stack_trace");
-		fp = fopen(path, "w");
-		if (!fp) {
+		fd = open(path, O_WRONLY);
+		if (fd < 0) {
 			tracefs_put_tracing_file(path);
 			return;
 		}
@@ -1692,8 +1705,8 @@ set_plugin_instance(struct buffer_instance *instance, const char *name)
 	 */
 	add_reset_file(path, "0", RESET_HIGH_PRIO);
 	tracefs_put_tracing_file(path);
-	fwrite(&zero, 1, 1, fp);
-	fclose(fp);
+	write(fd, &zero, 1);
+	close(fd);
 }
 
 static void set_plugin(const char *name)
@@ -3190,239 +3203,37 @@ static int do_accept(int sd)
 	return -1;
 }
 
-static bool is_digits(const char *s)
+static char *parse_guest_name(char *gname, int *cid, int *port)
 {
-	for (; *s; s++)
-		if (!isdigit(*s))
-			return false;
-	return true;
-}
-
-struct guest {
-	char *name;
-	int cid;
-	int pid;
-	int cpu_max;
-	int *cpu_pid;
-};
-
-static struct guest *guests;
-static size_t guests_len;
-
-static int set_vcpu_pid_mapping(struct guest *guest, int cpu, int pid)
-{
-	int *cpu_pid;
-	int i;
-
-	if (cpu >= guest->cpu_max) {
-		cpu_pid = realloc(guest->cpu_pid, (cpu + 1) * sizeof(int));
-		if (!cpu_pid)
-			return -1;
-		/* Handle sparse CPU numbers */
-		for (i = guest->cpu_max; i < cpu; i++)
-			cpu_pid[i] = -1;
-		guest->cpu_max = cpu + 1;
-		guest->cpu_pid = cpu_pid;
-	}
-	guest->cpu_pid[cpu] = pid;
-	return 0;
-}
-
-static struct guest *get_guest_info(unsigned int guest_cid)
-{
-	int i;
-
-	if (!guests)
-		return NULL;
-
-	for (i = 0; i < guests_len; i++)
-		if (guest_cid == guests[i].cid)
-			return guests + i;
-	return NULL;
-}
-
-static char *get_qemu_guest_name(char *arg)
-{
-	char *tok, *end = arg;
-
-	while ((tok = strsep(&end, ","))) {
-		if (strncmp(tok, "guest=", 6) == 0)
-			return tok + 6;
-	}
-
-	return arg;
-}
-
-static int read_qemu_guests_pids(char *guest_task, struct guest *guest)
-{
-	struct dirent *entry;
-	char path[PATH_MAX];
-	char *buf = NULL;
-	size_t n = 0;
-	int ret = 0;
-	long vcpu;
-	long pid;
-	DIR *dir;
-	FILE *f;
-
-	snprintf(path, sizeof(path), "/proc/%s/task", guest_task);
-	dir = opendir(path);
-	if (!dir)
-		return -1;
-
-	while (!ret && (entry = readdir(dir))) {
-		if (!(entry->d_type == DT_DIR && is_digits(entry->d_name)))
-			continue;
-
-		snprintf(path, sizeof(path), "/proc/%s/task/%s/comm",
-			 guest_task, entry->d_name);
-		f = fopen(path, "r");
-		if (!f)
-			continue;
-
-		if (getline(&buf, &n, f) >= 0 &&
-		    strncmp(buf, "CPU ", 4) == 0) {
-			vcpu = strtol(buf + 4, NULL, 10);
-			pid = strtol(entry->d_name, NULL, 10);
-			if (vcpu < INT_MAX && pid < INT_MAX &&
-			    vcpu >= 0 && pid >= 0) {
-				if (set_vcpu_pid_mapping(guest, vcpu, pid))
-					ret = -1;
-			}
-		}
-
-		fclose(f);
-	}
-	free(buf);
-	return ret;
-}
-
-static void read_qemu_guests(void)
-{
-	static bool initialized;
-	struct dirent *entry;
-	char path[PATH_MAX];
-	DIR *dir;
-
-	if (initialized)
-		return;
-
-	initialized = true;
-	dir = opendir("/proc");
-	if (!dir)
-		die("Can not open /proc");
-
-	while ((entry = readdir(dir))) {
-		bool is_qemu = false, last_was_name = false;
-		struct guest guest = {};
-		char *p, *arg = NULL;
-		size_t arg_size = 0;
-		FILE *f;
-
-		if (!(entry->d_type == DT_DIR && is_digits(entry->d_name)))
-			continue;
-
-		guest.pid = atoi(entry->d_name);
-		snprintf(path, sizeof(path), "/proc/%s/cmdline", entry->d_name);
-		f = fopen(path, "r");
-		if (!f)
-			continue;
-
-		while (getdelim(&arg, &arg_size, 0, f) != -1) {
-			if (!is_qemu && strstr(arg, "qemu-system-")) {
-				is_qemu = true;
-				continue;
-			}
-
-			if (!is_qemu)
-				continue;
-
-			if (strcmp(arg, "-name") == 0) {
-				last_was_name = true;
-				continue;
-			}
-
-			if (last_was_name) {
-				guest.name = strdup(get_qemu_guest_name(arg));
-				if (!guest.name)
-					die("allocating guest name");
-				last_was_name = false;
-				continue;
-			}
-
-			p = strstr(arg, "guest-cid=");
-			if (p) {
-				guest.cid = atoi(p + 10);
-				continue;
-			}
-		}
-
-		if (!is_qemu)
-			goto next;
-
-		if (read_qemu_guests_pids(entry->d_name, &guest))
-			warning("Failed to retrieve VPCU - PID mapping for guest %s",
-					guest.name ? guest.name : "Unknown");
-
-		guests = realloc(guests, (guests_len + 1) * sizeof(*guests));
-		if (!guests)
-			die("Can not allocate guest buffer");
-		guests[guests_len++] = guest;
-
-next:
-		free(arg);
-		fclose(f);
-	}
-
-	closedir(dir);
-}
-
-static char *parse_guest_name(char *guest, int *cid, int *port)
-{
-	size_t i;
+	struct trace_guest *guest;
 	char *p;
 
 	*port = -1;
-	p = strrchr(guest, ':');
+	p = strrchr(gname, ':');
 	if (p) {
 		*p = '\0';
 		*port = atoi(p + 1);
 	}
 
 	*cid = -1;
-	p = strrchr(guest, '@');
+	p = strrchr(gname, '@');
 	if (p) {
 		*p = '\0';
 		*cid = atoi(p + 1);
-	} else if (is_digits(guest))
-		*cid = atoi(guest);
+	} else if (is_digits(gname))
+		*cid = atoi(gname);
 
 	read_qemu_guests();
-	for (i = 0; i < guests_len; i++) {
-		if ((*cid > 0 && *cid == guests[i].cid) ||
-		    strcmp(guest, guests[i].name) == 0) {
-			*cid = guests[i].cid;
-			return guests[i].name;
-		}
+	if (*cid > 0)
+		guest = get_guest_by_cid(*cid);
+	else
+		guest = get_guest_by_name(gname);
+	if (guest) {
+		*cid = guest->cid;
+		return guest->name;
 	}
 
-	return guest;
-}
-
-int get_guest_vcpu_pid(unsigned int guest_cid, unsigned int guest_vcpu)
-{
-	int i;
-
-	if (!guests)
-		return -1;
-
-	for (i = 0; i < guests_len; i++) {
-		if (guests[i].cpu_pid < 0 || guest_vcpu >= guests[i].cpu_max)
-			continue;
-		if (guest_cid == guests[i].cid)
-			return guests[i].cpu_pid[guest_vcpu];
-	}
-	return -1;
+	return gname;
 }
 
 static void set_prio(int prio)
@@ -3544,10 +3355,17 @@ static int create_recorder(struct buffer_instance *instance, int cpu,
 		}
 		if (fd < 0)
 			die("Failed connecting to client");
-		if (tracefs_instance_get_name(instance->tracefs) && !is_agent(instance))
+		if (tracefs_instance_get_name(instance->tracefs) && !is_agent(instance)) {
 			path = tracefs_instance_get_dir(instance->tracefs);
-		else
-			path = tracefs_find_tracing_dir();
+		} else {
+			const char *dir = tracefs_tracing_dir();
+
+			if (dir)
+				path = strdup(dir);
+		}
+		if (!path)
+			die("can't get the tracing directory");
+
 		recorder = tracecmd_create_buffer_recorder_fd(fd, cpu, flags, path);
 		tracefs_put_tracing_file(path);
 	} else {
@@ -3792,22 +3610,36 @@ static void add_options(struct tracecmd_output *handle, struct common_record_con
 static struct tracecmd_msg_handle *
 setup_connection(struct buffer_instance *instance, struct common_record_context *ctx)
 {
-	struct tracecmd_msg_handle *msg_handle;
-	struct tracecmd_output *network_handle;
+	struct tracecmd_msg_handle *msg_handle = NULL;
+	struct tracecmd_output *network_handle = NULL;
+	int ret;
 
 	msg_handle = setup_network(instance);
 
 	/* Now create the handle through this socket */
 	if (msg_handle->version == V3_PROTOCOL) {
 		network_handle = tracecmd_create_init_fd_msg(msg_handle, listed_events);
+		if (!network_handle)
+			goto error;
 		tracecmd_set_quiet(network_handle, quiet);
 		add_options(network_handle, ctx);
-		tracecmd_write_cpus(network_handle, instance->cpu_count);
-		tracecmd_write_options(network_handle);
-		tracecmd_msg_finish_sending_data(msg_handle);
+		ret = tracecmd_write_cmdlines(network_handle);
+		if (ret)
+			goto error;
+		ret = tracecmd_write_cpus(network_handle, instance->cpu_count);
+		if (ret)
+			goto error;
+		ret = tracecmd_write_options(network_handle);
+		if (ret)
+			goto error;
+		ret = tracecmd_msg_finish_sending_data(msg_handle);
+		if (ret)
+			goto error;
 	} else {
 		network_handle = tracecmd_create_init_fd_glob(msg_handle->fd,
 							      listed_events);
+		if (!network_handle)
+			goto error;
 		tracecmd_set_quiet(network_handle, quiet);
 	}
 
@@ -3815,6 +3647,13 @@ setup_connection(struct buffer_instance *instance, struct common_record_context 
 
 	/* OK, we are all set, let'r rip! */
 	return msg_handle;
+
+error:
+	if (msg_handle)
+		tracecmd_msg_handle_close(msg_handle);
+	if (network_handle)
+		tracecmd_output_close(network_handle);
+	return NULL;
 }
 
 static void finish_network(struct tracecmd_msg_handle *msg_handle)
@@ -3849,23 +3688,41 @@ static int open_guest_fifos(const char *guest, int **fds)
 	return i;
 }
 
-#ifdef VSOCK
+static int host_tsync(struct buffer_instance *instance,
+		      unsigned int tsync_port, char *proto)
+{
+	struct trace_guest *guest;
+
+	if (!proto)
+		return -1;
+	guest = get_guest_by_cid(instance->cid);
+	if (guest == NULL)
+		return -1;
+
+	instance->tsync = tracecmd_tsync_with_guest(top_instance.trace_id,
+						    instance->tsync_loop_interval,
+						    instance->cid, tsync_port,
+						    guest->pid, guest->cpu_max,
+						    proto, top_instance.clock);
+	if (!instance->tsync)
+		return -1;
+
+	return 0;
+}
+
 static void connect_to_agent(struct buffer_instance *instance)
 {
-	struct tracecmd_msg_handle *msg_handle;
+	struct tracecmd_tsync_protos *protos = NULL;
 	int sd, ret, nr_fifos, nr_cpus, page_size;
-	unsigned int tsync_protos_reply = 0;
+	struct tracecmd_msg_handle *msg_handle;
+	char *tsync_protos_reply = NULL;
 	unsigned int tsync_port = 0;
-	char *protos = NULL;
-	int protos_count = 0;
 	unsigned int *ports;
 	int i, *fds = NULL;
 	bool use_fifos = false;
-	char *name;
 
-	name = tracefs_instance_get_name(instance->tracefs);
 	if (!no_fifos) {
-		nr_fifos = open_guest_fifos(name, &fds);
+		nr_fifos = open_guest_fifos(instance->name, &fds);
 		use_fifos = nr_fifos > 0;
 	}
 
@@ -3878,38 +3735,45 @@ static void connect_to_agent(struct buffer_instance *instance)
 	if (!msg_handle)
 		die("Failed to allocate message handle");
 
-	if (instance->tsync.loop_interval >= 0)
-		tracecmd_tsync_proto_getall(&protos, &protos_count);
+	if (!instance->clock)
+		instance->clock = tracefs_get_clock(NULL);
+
+	if (instance->tsync_loop_interval >= 0)
+		tracecmd_tsync_proto_getall(&protos, instance->clock,
+					    TRACECMD_TIME_SYNC_ROLE_HOST);
 
 	ret = tracecmd_msg_send_trace_req(msg_handle, instance->argc,
 					  instance->argv, use_fifos,
-					  top_instance.trace_id,
-					  protos, protos_count);
+					  top_instance.trace_id, protos);
 	if (ret < 0)
 		die("Failed to send trace request");
 
-	free(protos);
-
+	if (protos) {
+		free(protos->names);
+		free(protos);
+	}
 	ret = tracecmd_msg_recv_trace_resp(msg_handle, &nr_cpus, &page_size,
 					   &ports, &use_fifos,
 					   &instance->trace_id,
 					   &tsync_protos_reply, &tsync_port);
 	if (ret < 0)
 		die("Failed to receive trace response %d", ret);
-
-	if (protos_count && tsync_protos_reply) {
+	if (tsync_protos_reply && tsync_protos_reply[0]) {
 		if (tsync_proto_is_supported(tsync_protos_reply)) {
-			instance->tsync.sync_proto = tsync_protos_reply;
-			tracecmd_host_tsync(instance, tsync_port);
+			printf("Negotiated %s time sync protocol with guest %s\n",
+				tsync_protos_reply,
+				instance->name);
+			host_tsync(instance, tsync_port, tsync_protos_reply);
 		} else
 			warning("Failed to negotiate timestamps synchronization with the guest");
 	}
+	free(tsync_protos_reply);
 
 	if (use_fifos) {
 		if (nr_cpus != nr_fifos) {
 			warning("number of FIFOs (%d) for guest %s differs "
 				"from number of virtual CPUs (%d)",
-				nr_fifos, name, nr_cpus);
+				nr_fifos, instance->name, nr_cpus);
 			nr_cpus = nr_cpus < nr_fifos ? nr_cpus : nr_fifos;
 		}
 		free(ports);
@@ -3927,12 +3791,6 @@ static void connect_to_agent(struct buffer_instance *instance)
 	/* the msg_handle now points to the guest fd */
 	instance->msg_handle = msg_handle;
 }
-#else
-static inline void connect_to_agent(struct buffer_instance *instance)
-{
-}
-#endif
-
 
 static void setup_guest(struct buffer_instance *instance)
 {
@@ -3942,8 +3800,7 @@ static void setup_guest(struct buffer_instance *instance)
 	int fd;
 
 	/* Create a place to store the guest meta data */
-	file = trace_get_guest_file(output_file,
-				    tracefs_instance_get_name(instance->tracefs));
+	file = trace_get_guest_file(output_file, instance->name);
 	if (!file)
 		die("Failed to allocate memory");
 
@@ -3968,6 +3825,7 @@ static void setup_agent(struct buffer_instance *instance,
 	network_handle = tracecmd_create_init_fd_msg(instance->msg_handle,
 						     listed_events);
 	add_options(network_handle, ctx);
+	tracecmd_write_cmdlines(network_handle);
 	tracecmd_write_cpus(network_handle, instance->cpu_count);
 	tracecmd_write_options(network_handle);
 	tracecmd_msg_finish_sending_data(instance->msg_handle);
@@ -4088,7 +3946,7 @@ static void append_buffer(struct tracecmd_output *handle,
 static void
 add_guest_info(struct tracecmd_output *handle, struct buffer_instance *instance)
 {
-	struct guest *guest = get_guest_info(instance->cid);
+	struct trace_guest *guest = get_guest_by_cid(instance->cid);
 	char *buf, *p;
 	int size;
 	int i;
@@ -4412,6 +4270,9 @@ static void record_data(struct common_record_context *ctx)
 				add_guest_info(handle, instance);
 		}
 
+		if (tracecmd_write_cmdlines(handle))
+			die("Writing cmdlines");
+
 		tracecmd_append_cpu_data(handle, local_cpu_count, temp_files);
 
 		for (i = 0; i < max_cpu_count; i++)
@@ -4590,7 +4451,7 @@ static unsigned long long find_time_stamp(struct tep_handle *tep)
 {
 	unsigned long long ts = 0;
 
-	if (!tracefs_iterate_raw_events(tep, NULL, find_ts, &ts))
+	if (!tracefs_iterate_raw_events(tep, NULL, NULL, 0, find_ts, &ts))
 		return ts;
 
 	return 0;
@@ -5034,9 +4895,11 @@ static void make_instances(void)
 	for_each_instance(instance) {
 		if (is_guest(instance))
 			continue;
-		if (tracefs_instance_create(instance->tracefs) > 0) {
+		if (instance->name && !instance->tracefs) {
+			instance->tracefs = tracefs_instance_create(instance->name);
 			/* Don't delete instances that already exist */
-			instance->flags |= BUFFER_FL_KEEP;
+			if (instance->tracefs && !tracefs_instance_is_new(instance->tracefs))
+				instance->flags |= BUFFER_FL_KEEP;
 		}
 	}
 }
@@ -5055,25 +4918,6 @@ void tracecmd_remove_instances(void)
 		}
 		tracefs_instance_destroy(instance->tracefs);
 	}
-}
-
-/**
- * tracecmd_create_top_instance - create a top named instance
- * @name: name of the instance to use.
- *
- * This is a library function for tools that want to do their tracing inside of
- * an instance.  All it does is create an instance and set it as a top instance,
- * you don't want to call this more than once, and you want to call
- * tracecmd_remove_instances to undo your work.
- */
-void tracecmd_create_top_instance(char *name)
-{
-	struct buffer_instance *instance;
-
-	instance = create_instance(name);
-	add_instance(instance, local_cpu_count);
-	update_first_instance(instance, 0);
-	make_instances();
 }
 
 static void check_plugin(const char *plugin)
@@ -5533,7 +5377,7 @@ void update_first_instance(struct buffer_instance *instance, int topt)
 void init_top_instance(void)
 {
 	if (!top_instance.tracefs)
-		top_instance.tracefs = tracefs_instance_alloc(NULL);
+		top_instance.tracefs = tracefs_instance_create(NULL);
 	top_instance.cpu_count = tracecmd_count_cpus();
 	top_instance.flags = BUFFER_FL_KEEP;
 	top_instance.trace_id = tracecmd_generate_traceid();
@@ -5580,7 +5424,7 @@ void trace_stop(int argc, char **argv)
 			usage(argv);
 			break;
 		case 'B':
-			instance = create_instance(optarg);
+			instance = allocate_instance(optarg);
 			if (!instance)
 				die("Failed to create instance");
 			add_instance(instance, local_cpu_count);
@@ -5620,7 +5464,7 @@ void trace_restart(int argc, char **argv)
 			usage(argv);
 			break;
 		case 'B':
-			instance = create_instance(optarg);
+			instance = allocate_instance(optarg);
 			if (!instance)
 				die("Failed to create instance");
 			add_instance(instance, local_cpu_count);
@@ -5678,7 +5522,7 @@ void trace_reset(int argc, char **argv)
 		}
 		case 'B':
 			last_specified_all = 0;
-			instance = create_instance(optarg);
+			instance = allocate_instance(optarg);
 			if (!instance)
 				die("Failed to create instance");
 			add_instance(instance, local_cpu_count);
@@ -5821,6 +5665,7 @@ static inline void remove_instances(struct buffer_instance *instances)
 	while (instances) {
 		del = instances;
 		instances = instances->next;
+		free(del->name);
 		tracefs_instance_destroy(del->tracefs);
 		tracefs_instance_free(del->tracefs);
 		free(del);
@@ -5978,10 +5823,11 @@ static void parse_record_options(int argc,
 					die("Failed to allocate guest name");
 			}
 
-			ctx->instance = create_instance(name);
+			ctx->instance = allocate_instance(name);
 			ctx->instance->flags |= BUFFER_FL_GUEST;
 			ctx->instance->cid = cid;
 			ctx->instance->port = port;
+			ctx->instance->name = name;
 			add_instance(ctx->instance, 0);
 			break;
 		}
@@ -6173,7 +6019,7 @@ static void parse_record_options(int argc,
 			ctx->instance->buffer_size = atoi(optarg);
 			break;
 		case 'B':
-			ctx->instance = create_instance(optarg);
+			ctx->instance = allocate_instance(optarg);
 			if (!ctx->instance)
 				die("Failed to create instance");
 			ctx->instance->delete = negative;
@@ -6275,7 +6121,7 @@ static void parse_record_options(int argc,
 			break;
 		case OPT_tsyncinterval:
 			cmd_check_die(ctx, CMD_set, *(argv+1), "--tsync-interval");
-			top_instance.tsync.loop_interval = atoi(optarg);
+			top_instance.tsync_loop_interval = atoi(optarg);
 			guest_sync_set = true;
 			break;
 		case OPT_fork:
@@ -6313,9 +6159,14 @@ static void parse_record_options(int argc,
 						 (char *)top_instance.clock,
 						 true);
 					add_argv(instance, "-C", true);
+					if (!instance->clock) {
+						instance->clock = strdup((char *)top_instance.clock);
+						if (!instance->clock)
+							die("Could not allocate instance clock");
+					}
 				}
 			}
-			instance->tsync.loop_interval = top_instance.tsync.loop_interval;
+			instance->tsync_loop_interval = top_instance.tsync_loop_interval;
 		}
 	}
 
@@ -6570,9 +6421,6 @@ static void record_trace(int argc, char **argv,
 
 	record_stats();
 
-	if (!keep)
-		tracecmd_disable_all_tracing(0);
-
 	if (!latency)
 		wait_threads();
 
@@ -6581,6 +6429,9 @@ static void record_trace(int argc, char **argv,
 		delete_thread_data();
 	} else
 		print_stats();
+
+	if (!keep)
+		tracecmd_disable_all_tracing(0);
 
 	destroy_stats();
 	finalize_record_trace(ctx);
@@ -6622,6 +6473,9 @@ void trace_extract(int argc, char **argv)
 
 	/* Save the state of tracing_on before starting */
 	for_all_instances(instance) {
+		instance->output_file = strdup(ctx.output);
+		if (!instance->output_file)
+			die("Failed to allocate output file name for instance");
 
 		if (!ctx.manual && instance->flags & BUFFER_FL_PROFILE)
 			enable_profile(ctx.instance);
@@ -6701,15 +6555,6 @@ void trace_profile(int argc, char **argv)
 
 	record_trace(argc, argv, &ctx);
 	do_trace_profile();
-	exit(0);
-}
-
-void trace_clear(int argc, char **argv)
-{
-	if (argc > 2)
-		usage(argv);
-	else
-		clear_trace();
 	exit(0);
 }
 

@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: GPL-2.0
 
 VERSION := $(TC_VERSION)
 PATCHLEVEL := $(TC_PATCHLEVEL)
@@ -10,6 +11,8 @@ TARGETS = $(bdir)/trace-cmd $(TC_VERSION)
 
 BUILDGUI := 0
 include $(src)/scripts/utils.mk
+
+CFLAGS += -I$(bdir)/include
 
 TRACE_CMD_OBJS =
 TRACE_CMD_OBJS += trace-cmd.o
@@ -31,9 +34,8 @@ TRACE_CMD_OBJS += trace-show.o
 TRACE_CMD_OBJS += trace-list.o
 TRACE_CMD_OBJS += trace-usage.o
 TRACE_CMD_OBJS += trace-dump.o
-ifeq ($(VSOCK_DEFINED), 1)
-TRACE_CMD_OBJS += trace-tsync.o
-endif
+TRACE_CMD_OBJS += trace-clear.o
+TRACE_CMD_OBJS += trace-vm.o
 
 ifeq ($(VSOCK_DEFINED), 1)
 TRACE_CMD_OBJS += trace-agent.o
@@ -46,7 +48,7 @@ all_objs := $(sort $(ALL_OBJS))
 all_deps := $(all_objs:$(bdir)/%.o=$(bdir)/.%.d)
 
 CONFIG_INCLUDES =
-CONFIG_LIBS	= -lrt -lpthread
+CONFIG_LIBS	= -lrt -lpthread $(TRACE_LIBS)
 CONFIG_FLAGS	=
 
 all: $(TARGETS)
@@ -66,7 +68,7 @@ $(all_objs): | $(bdir)
 $(bdir)/trace-cmd: $(ALL_OBJS)
 	$(Q)$(do_app_build)
 
-$(bdir)/trace-cmd: $(LIBTRACECMD_STATIC) $(LIBTRACEEVENT_STATIC) $(LIBTRACEFS_STATIC)
+$(bdir)/trace-cmd: $(LIBTRACECMD_STATIC)
 
 $(bdir)/%.o: %.c
 	$(Q)$(call do_compile)

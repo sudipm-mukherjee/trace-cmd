@@ -13,21 +13,24 @@
 #include <errno.h>
 #include <sys/stat.h>
 #include <fcntl.h>
+#include <dirent.h>
 #include <linux/limits.h>
 #include "tracefs.h"
 #include "tracefs-local.h"
 
+#define FLAG_INSTANCE_NEWLY_CREATED	(1 << 0)
 struct tracefs_instance {
-	char *name;
+	char	*name;
+	int	flags;
 };
 
 /**
- * tracefs_instance_alloc - allocate a new ftrace instance
+ * instance_alloc - allocate a new ftrace instance
  * @name: The name of the instance (instance will point to this)
  *
  * Returns a newly allocated instance, or NULL in case of an error.
  */
-struct tracefs_instance *tracefs_instance_alloc(const char *name)
+static struct tracefs_instance *instance_alloc(const char *name)
 {
 	struct tracefs_instance *instance;
 
@@ -45,7 +48,7 @@ struct tracefs_instance *tracefs_instance_alloc(const char *name)
 
 /**
  * tracefs_instance_free - Free an instance, previously allocated by
-			   tracefs_instance_alloc()
+			   tracefs_instance_create()
  * @instance: Pointer to the instance to be freed
  *
  */
@@ -57,27 +60,77 @@ void tracefs_instance_free(struct tracefs_instance *instance)
 	free(instance);
 }
 
-/**
- * tracefs_instance_create - Create a new ftrace instance
- * @instance: Pointer to the instance to be created
- *
- * Returns 1 if the instance already exist, 0 if the instance
- * is created successful or -1 in case of an error
- */
-int tracefs_instance_create(struct tracefs_instance *instance)
+static mode_t get_trace_file_permissions(char *name)
 {
+	mode_t rmode = 0;
 	struct stat st;
 	char *path;
 	int ret;
 
-	path = tracefs_instance_get_dir(instance);
+	path = tracefs_get_tracing_file(name);
+	if (!path)
+		return 0;
 	ret = stat(path, &st);
-	if (ret < 0)
-		ret = mkdir(path, 0777);
-	else
-		ret = 1;
+	if (ret)
+		goto out;
+	rmode = st.st_mode & ACCESSPERMS;
+out:
 	tracefs_put_tracing_file(path);
-	return ret;
+	return rmode;
+}
+
+/**
+ * tracefs_instance_is_new - Check if the instance is newly created by the library
+ * @instance: Pointer to an ftrace instance
+ *
+ * Returns true, if the ftrace instance is newly created by the library or
+ * false otherwise.
+ */
+bool tracefs_instance_is_new(struct tracefs_instance *instance)
+{
+	if (instance && (instance->flags & FLAG_INSTANCE_NEWLY_CREATED))
+		return true;
+	return false;
+}
+
+/**
+ * tracefs_instance_create - Create a new ftrace instance
+ * @name: Name of the instance to be created
+ *
+ * Allocates and initializes a new instance structure. If the instance does not
+ * exist in the system, create it.
+ * Returns a pointer to a newly allocated instance, or NULL in case of an error.
+ * The returned instance must be freed by tracefs_instance_free().
+ */
+struct tracefs_instance *tracefs_instance_create(const char *name)
+{
+	struct tracefs_instance *inst = NULL;
+	struct stat st;
+	mode_t mode;
+	char *path;
+	int ret;
+
+	inst = instance_alloc(name);
+	if (!inst)
+		return NULL;
+
+	path = tracefs_instance_get_dir(inst);
+	ret = stat(path, &st);
+	if (ret < 0) {
+		/* Cannot create the top instance, if it does not exist! */
+		if (!name)
+			goto error;
+		mode = get_trace_file_permissions("instances");
+		if (mkdir(path, mode))
+			goto error;
+		inst->flags |= FLAG_INSTANCE_NEWLY_CREATED;
+	}
+	tracefs_put_tracing_file(path);
+	return inst;
+
+error:
+	tracefs_instance_free(inst);
+	return NULL;
 }
 
 /**
@@ -157,7 +210,7 @@ char *tracefs_instance_get_dir(struct tracefs_instance *instance)
 		path = tracefs_get_tracing_file(buf);
 		free(buf);
 	} else
-		path = tracefs_find_tracing_dir();
+		path = trace_find_tracing_dir();
 
 	return path;
 }
@@ -169,7 +222,7 @@ char *tracefs_instance_get_dir(struct tracefs_instance *instance)
  * Returns the name of the given @instance.
  * The returned string must *not* be freed.
  */
-char *tracefs_instance_get_name(struct tracefs_instance *instance)
+const char *tracefs_instance_get_name(struct tracefs_instance *instance)
 {
 	if (instance)
 		return instance->name;
@@ -257,13 +310,33 @@ static bool check_file_exists(struct tracefs_instance *instance,
 	int ret;
 
 	path = tracefs_instance_get_dir(instance);
-	snprintf(file, PATH_MAX, "%s/%s", path, name);
+	if (name)
+		snprintf(file, PATH_MAX, "%s/%s", path, name);
+	else
+		snprintf(file, PATH_MAX, "%s", path);
 	tracefs_put_tracing_file(path);
 	ret = stat(file, &st);
 	if (ret < 0)
 		return false;
 
 	return !dir == !S_ISDIR(st.st_mode);
+}
+
+/**
+ * tracefs_instance_exists - Check an instance with given name exists
+ * @name: name of the instance
+ *
+ * Returns true if the instance exists, false otherwise
+ *
+ */
+bool tracefs_instance_exists(const char *name)
+{
+	char file[PATH_MAX];
+
+	if (!name)
+		return false;
+	snprintf(file, PATH_MAX, "instances/%s", name);
+	return check_file_exists(NULL, file, true);
 }
 
 /**
@@ -290,4 +363,93 @@ bool tracefs_file_exists(struct tracefs_instance *instance, char *name)
 bool tracefs_dir_exists(struct tracefs_instance *instance, char *name)
 {
 	return check_file_exists(instance, name, true);
+}
+
+/**
+ * tracefs_instances_walk - Iterate through all ftrace instances in the system
+ * @callback: user callback, called for each instance. Instance name is passed
+ *	      as input parameter. If the @callback returns non-zero,
+ *	      the iteration stops.
+ * @context: user context, passed to the @callback.
+ *
+ * Returns -1 in case of an error, 1 if the iteration was stopped because of the
+ * callback return value or 0 otherwise.
+ */
+int tracefs_instances_walk(int (*callback)(const char *, void *), void *context)
+{
+	struct dirent *dent;
+	char *path = NULL;
+	DIR *dir = NULL;
+	struct stat st;
+	int fret = -1;
+	int ret;
+
+	path = tracefs_get_tracing_file("instances");
+	if (!path)
+		return -1;
+	ret = stat(path, &st);
+	if (ret < 0 || !S_ISDIR(st.st_mode))
+		goto out;
+
+	dir = opendir(path);
+	if (!dir)
+		goto out;
+	fret = 0;
+	while ((dent = readdir(dir))) {
+		char *instance;
+
+		if (strcmp(dent->d_name, ".") == 0 ||
+		    strcmp(dent->d_name, "..") == 0)
+			continue;
+		instance = trace_append_file(path, dent->d_name);
+		ret = stat(instance, &st);
+		free(instance);
+		if (ret < 0 || !S_ISDIR(st.st_mode))
+			continue;
+		if (callback(dent->d_name, context)) {
+			fret = 1;
+			break;
+		}
+	}
+
+out:
+	if (dir)
+		closedir(dir);
+	tracefs_put_tracing_file(path);
+	return fret;
+}
+
+/**
+ * tracefs_get_clock - Get the current trace clock
+ * @instance: ftrace instance, can be NULL for the top instance
+ *
+ * Returns the current trace clock of the given instance, or NULL in
+ * case of an error.
+ * The return string must be freed by free()
+ */
+char *tracefs_get_clock(struct tracefs_instance *instance)
+{
+	char *all_clocks = NULL;
+	char *ret = NULL;
+	int bytes = 0;
+	char *clock;
+	char *cont;
+
+	all_clocks  = tracefs_instance_file_read(instance, "trace_clock", &bytes);
+	if (!all_clocks || !bytes)
+		goto out;
+
+	clock = strstr(all_clocks, "[");
+	if (!clock)
+		goto out;
+	clock++;
+	cont = strstr(clock, "]");
+	if (!cont)
+		goto out;
+	*cont = '\0';
+
+	ret = strdup(clock);
+out:
+	free(all_clocks);
+	return ret;
 }

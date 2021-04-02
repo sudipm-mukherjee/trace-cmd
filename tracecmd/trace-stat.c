@@ -7,7 +7,6 @@
 #include <sys/stat.h>
 #include <stdlib.h>
 #include <stdio.h>
-#include <dirent.h>
 #include <getopt.h>
 #include <unistd.h>
 #include <fcntl.h>
@@ -140,48 +139,23 @@ static void report_file(struct buffer_instance *instance,
 	free(str);
 }
 
+static int report_instance(const char *name, void *data)
+{
+	bool *first = (bool *)data;
+
+	if (*first) {
+		*first = false;
+		printf("\nInstances:\n");
+	}
+	printf(" %s\n", name);
+	return 0;
+}
+
 static void report_instances(void)
 {
-	struct dirent *dent;
 	bool first = true;
-	char *path = NULL;
-	DIR *dir = NULL;
-	struct stat st;
-	int ret;
 
-	path = tracefs_get_tracing_file("instances");
-	if (!path)
-		return;
-	ret = stat(path, &st);
-	if (ret < 0 || !S_ISDIR(st.st_mode))
-		goto out;
-
-	dir = opendir(path);
-	if (!dir)
-		goto out;
-
-	while ((dent = readdir(dir))) {
-		char *instance;
-
-		if (strcmp(dent->d_name, ".") == 0 ||
-		    strcmp(dent->d_name, "..") == 0)
-			continue;
-		instance = append_file(path, dent->d_name);
-		ret = stat(instance, &st);
-		free(instance);
-		if (ret < 0 || !S_ISDIR(st.st_mode))
-			continue;
-		if (first) {
-			first = false;
-			printf("\nInstances:\n");
-		}
-		printf(" %s\n", dent->d_name);
-	}
-
-out:
-	if (dir)
-		closedir(dir);
-	tracefs_put_tracing_file(path);
+	tracefs_instances_walk(report_instance, &first);
 }
 
 struct event_iter *trace_event_iter_alloc(const char *path)
@@ -736,33 +710,16 @@ static void report_buffers(struct buffer_instance *instance)
 
 static void report_clock(struct buffer_instance *instance)
 {
-	char *str;
-	char *cont;
+	struct tracefs_instance *tracefs = instance ? instance->tracefs : NULL;
 	char *clock;
 
-	str = get_instance_file_content(instance, "trace_clock");
-	if (!str)
-		return;
-
-	clock = strstr(str, "[");
-	if (!clock)
-		goto out;
-	clock++;
-
-	cont = strstr(clock, "]");
-	if (!cont) /* should never happen */
-		goto out;
-
-	*cont = '\0';
+	clock = tracefs_get_clock(tracefs);
 
 	/* Default clock is "local", only show others */
-	if (strcmp(clock, "local") == 0)
-		goto out;
+	if (clock && !strcmp(clock, "local") == 0)
+		printf("\nClock: %s\n", clock);
 
-	printf("\nClock: %s\n", clock);
-
- out:
-	free(str);
+	free(clock);
 }
 
 static void report_cpumask(struct buffer_instance *instance)
@@ -926,7 +883,7 @@ void trace_stat (int argc, char **argv)
 			usage(argv);
 			break;
 		case 'B':
-			instance = create_instance(optarg);
+			instance = allocate_instance(optarg);
 			if (!instance)
 				die("Failed to create instance");
 			add_instance(instance, tracecmd_count_cpus());

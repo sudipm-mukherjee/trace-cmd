@@ -13,7 +13,7 @@
 #include <errno.h>
 
 #include "tracefs.h"
-#include "trace-cmd.h"
+#include "trace-cmd-private.h"
 #include "event-utils.h"
 
 /* F_GETPIPE_SZ was introduced in 2.6.35, older systems don't have it */
@@ -307,7 +307,7 @@ struct tracecmd_recorder *tracecmd_create_recorder_fd(int fd, int cpu, unsigned 
 {
 	const char *tracing;
 
-	tracing = tracefs_get_tracing_dir();
+	tracing = tracefs_tracing_dir();
 	if (!tracing) {
 		errno = ENODEV;
 		return NULL;
@@ -320,7 +320,7 @@ struct tracecmd_recorder *tracecmd_create_recorder(const char *file, int cpu, un
 {
 	const char *tracing;
 
-	tracing = tracefs_get_tracing_dir();
+	tracing = tracefs_tracing_dir();
 	if (!tracing) {
 		errno = ENODEV;
 		return NULL;
@@ -334,7 +334,7 @@ tracecmd_create_recorder_maxkb(const char *file, int cpu, unsigned flags, int ma
 {
 	const char *tracing;
 
-	tracing = tracefs_get_tracing_dir();
+	tracing = tracefs_tracing_dir();
 	if (!tracing) {
 		errno = ENODEV;
 		return NULL;

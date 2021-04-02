@@ -13,6 +13,7 @@
 #include <errno.h>
 #include <sys/stat.h>
 #include <fcntl.h>
+#include <limits.h>
 
 #include "kbuffer.h"
 #include "tracefs.h"
@@ -115,6 +116,9 @@ get_events_in_page(struct tep_handle *tep, void *page,
  *				per CPU trace buffers
  * @tep: a handle to the trace event parser context
  * @instance: ftrace instance, can be NULL for the top instance
+ * @cpus: Iterate only through the buffers of CPUs, set in the mask.
+ *	  If NULL, iterate through all CPUs.
+ * @cpu_size: size of @cpus set
  * @callback: A user function, called for each record from the file
  * @callback_context: A custom context, passed to the user callback function
  *
@@ -125,6 +129,7 @@ get_events_in_page(struct tep_handle *tep, void *page,
  */
 int tracefs_iterate_raw_events(struct tep_handle *tep,
 				struct tracefs_instance *instance,
+				cpu_set_t *cpus, int cpu_size,
 				int (*callback)(struct tep_event *,
 						struct tep_record *,
 						int, void *),
@@ -165,6 +170,8 @@ int tracefs_iterate_raw_events(struct tep_handle *tep,
 		if (strlen(name) < 4 || strncmp(name, "cpu", 3) != 0)
 			continue;
 		cpu = atoi(name + 3);
+		if (cpus && !CPU_ISSET_S(cpu, cpu_size, cpus))
+			continue;
 		sprintf(file, "%s/%s", path, name);
 		ret = stat(file, &st);
 		if (ret < 0 || !S_ISDIR(st.st_mode))
@@ -210,7 +217,7 @@ static char **add_list_string(char **list, const char *name, int len)
 	return list;
 }
 
-static char *append_file(const char *dir, const char *name)
+__hidden char *trace_append_file(const char *dir, const char *name)
 {
 	char *file;
 	int ret;
@@ -260,12 +267,12 @@ char **tracefs_event_systems(const char *tracing_dir)
 	int ret;
 
 	if (!tracing_dir)
-		tracing_dir = tracefs_get_tracing_dir();
+		tracing_dir = tracefs_tracing_dir();
 
 	if (!tracing_dir)
 		return NULL;
 
-	events_dir = append_file(tracing_dir, "events");
+	events_dir = trace_append_file(tracing_dir, "events");
 	if (!events_dir)
 		return NULL;
 
@@ -290,14 +297,14 @@ char **tracefs_event_systems(const char *tracing_dir)
 		    strcmp(name, "..") == 0)
 			continue;
 
-		sys = append_file(events_dir, name);
+		sys = trace_append_file(events_dir, name);
 		ret = stat(sys, &st);
 		if (ret < 0 || !S_ISDIR(st.st_mode)) {
 			free(sys);
 			continue;
 		}
 
-		enable = append_file(sys, "enable");
+		enable = trace_append_file(sys, "enable");
 
 		ret = stat(enable, &st);
 		if (ret >= 0)
@@ -334,7 +341,7 @@ char **tracefs_system_events(const char *tracing_dir, const char *system)
 	int ret;
 
 	if (!tracing_dir)
-		tracing_dir = tracefs_get_tracing_dir();
+		tracing_dir = tracefs_tracing_dir();
 
 	if (!tracing_dir || !system)
 		return NULL;
@@ -359,7 +366,7 @@ char **tracefs_system_events(const char *tracing_dir, const char *system)
 		    strcmp(name, "..") == 0)
 			continue;
 
-		event = append_file(system_dir, name);
+		event = trace_append_file(system_dir, name);
 		ret = stat(event, &st);
 		if (ret < 0 || !S_ISDIR(st.st_mode)) {
 			free(event);
@@ -401,7 +408,7 @@ char **tracefs_tracers(const char *tracing_dir)
 	if (!tracing_dir)
 		return NULL;
 
-	available_tracers = append_file(tracing_dir, "available_tracers");
+	available_tracers = trace_append_file(tracing_dir, "available_tracers");
 	if (!available_tracers)
 		return NULL;
 
@@ -481,11 +488,7 @@ next_event:
 			failure = ret;
 	}
 
-	if (events) {
-		for (i = 0; events[i]; i++)
-			free(events[i]);
-		free(events);
-	}
+	tracefs_list_free(events);
 	return failure;
 }
 
@@ -497,7 +500,7 @@ static int read_header(struct tep_handle *tep, const char *tracing_dir)
 	int len;
 	int ret = -1;
 
-	header = append_file(tracing_dir, "events/header_page");
+	header = trace_append_file(tracing_dir, "events/header_page");
 
 	ret = stat(header, &st);
 	if (ret < 0)
@@ -537,7 +540,7 @@ static int fill_local_events_system(const char *tracing_dir,
 	int i;
 
 	if (!tracing_dir)
-		tracing_dir = tracefs_get_tracing_dir();
+		tracing_dir = tracefs_tracing_dir();
 	if (!tracing_dir)
 		return -1;
 
@@ -564,11 +567,7 @@ static int fill_local_events_system(const char *tracing_dir,
 	/* always succeed because parsing failures are not critical */
 	ret = 0;
 out:
-	if (systems) {
-		for (i = 0; systems[i]; i++)
-			free(systems[i]);
-		free(systems);
-	}
+	tracefs_list_free(systems);
 	return ret;
 }
 

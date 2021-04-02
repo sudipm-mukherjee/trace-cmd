@@ -26,10 +26,10 @@
 #include "trace-cmd-local.h"
 #include "trace-local.h"
 #include "trace-msg.h"
+#include "trace-cmd.h"
 
 typedef __u32 u32;
 typedef __be32 be32;
-typedef __s64 s64;
 
 static inline void dprint(const char *fmt, ...)
 {
@@ -56,11 +56,11 @@ struct tracecmd_msg_tinit {
 	be32 cpus;
 	be32 page_size;
 	be32 opt_num;
-} __attribute__((packed));
+} __packed;
 
 struct tracecmd_msg_rinit {
 	be32 cpus;
-} __attribute__((packed));
+} __packed;
 
 #define TRACE_REQ_PARAM_SIZE  (2 * sizeof(int))
 enum trace_req_params {
@@ -78,27 +78,27 @@ struct tracecmd_msg_trace_req {
 	be32 flags;
 	be32 argc;
 	u64 trace_id;
-} __attribute__((packed));
+} __packed;
 
 struct tracecmd_msg_trace_resp {
 	be32 flags;
 	be32 cpus;
 	be32 page_size;
 	u64 trace_id;
-	be32 tsync_proto;
+	char tsync_proto_name[TRACECMD_TSYNC_PNAME_LENGTH];
 	be32 tsync_port;
-} __attribute__((packed));
+} __packed;
 
 struct tracecmd_msg_tsync {
-	be32 sync_protocol;
+	char sync_protocol_name[TRACECMD_TSYNC_PNAME_LENGTH];
 	be32 sync_msg_id;
-} __attribute__((packed));
+} __packed;
 
 struct tracecmd_msg_header {
 	be32	size;
 	be32	cmd;
 	be32	cmd_size;
-} __attribute__((packed));
+} __packed;
 
 #define MSG_MAP								\
 	C(CLOSE,	0,	0),					\
@@ -147,7 +147,7 @@ struct tracecmd_msg {
 		struct tracecmd_msg_tsync	tsync;
 	};
 	char					*buf;
-} __attribute__((packed));
+} __packed;
 
 static inline int msg_buf_len(struct tracecmd_msg *msg)
 {
@@ -848,11 +848,19 @@ int tracecmd_msg_wait_close_resp(struct tracecmd_msg_handle *msg_handle)
 }
 
 static int make_trace_req_protos(char **buf, int *size,
-				 int protos_size, char *tsync_protos)
+				 struct tracecmd_tsync_protos *protos)
 {
+	int protos_size = 1;
 	size_t buf_size;
+	char **names;
 	char *nbuf;
 	char *p;
+
+	names = protos->names;
+	while (*names) {
+		protos_size += strlen(*names) + 1;
+		names++;
+	}
 
 	buf_size = TRACE_REQ_PARAM_SIZE + protos_size;
 	nbuf = realloc(*buf, *size + buf_size);
@@ -867,7 +875,13 @@ static int make_trace_req_protos(char **buf, int *size,
 	*(unsigned int *)p = htonl(protos_size);
 	p += sizeof(int);
 
-	memcpy(p, tsync_protos, protos_size);
+	names = protos->names;
+	while (*names) {
+		strcpy(p, *names);
+		p += strlen(*names) + 1;
+		names++;
+	}
+	p = NULL;
 
 	*size += buf_size;
 	*buf = nbuf;
@@ -911,7 +925,7 @@ static int make_trace_req_args(char **buf, int *size, int argc, char **argv)
 
 static int make_trace_req(struct tracecmd_msg *msg, int argc, char **argv,
 			  bool use_fifos, unsigned long long trace_id,
-			  char *tsync_protos, int tsync_protos_size)
+			  struct tracecmd_tsync_protos *protos)
 {
 	int size = 0;
 	char *buf = NULL;
@@ -924,9 +938,8 @@ static int make_trace_req(struct tracecmd_msg *msg, int argc, char **argv,
 
 	if (argc && argv)
 		make_trace_req_args(&buf, &size, argc, argv);
-	if (tsync_protos_size && tsync_protos)
-		make_trace_req_protos(&buf, &size,
-				      tsync_protos_size, tsync_protos);
+	if (protos && protos->names)
+		make_trace_req_protos(&buf, &size, protos);
 
 	msg->buf = buf;
 	msg->hdr.size = htonl(ntohl(msg->hdr.size) + size);
@@ -937,15 +950,13 @@ static int make_trace_req(struct tracecmd_msg *msg, int argc, char **argv,
 int tracecmd_msg_send_trace_req(struct tracecmd_msg_handle *msg_handle,
 				int argc, char **argv, bool use_fifos,
 				unsigned long long trace_id,
-				char *tsync_protos,
-				int tsync_protos_size)
+				struct tracecmd_tsync_protos *protos)
 {
 	struct tracecmd_msg msg;
 	int ret;
 
 	tracecmd_msg_init(MSG_TRACE_REQ, &msg);
-	ret = make_trace_req(&msg, argc, argv, use_fifos,
-			     trace_id, tsync_protos, tsync_protos_size);
+	ret = make_trace_req(&msg, argc, argv, use_fifos, trace_id, protos);
 	if (ret < 0)
 		return ret;
 
@@ -953,16 +964,44 @@ int tracecmd_msg_send_trace_req(struct tracecmd_msg_handle *msg_handle,
 }
 
 static int get_trace_req_protos(char *buf, int length,
-				char **tsync_protos,
-				unsigned int *tsync_protos_size)
+				struct tracecmd_tsync_protos **protos)
 {
-	*tsync_protos = malloc(length);
-	if (!*tsync_protos)
-		return -1;
-	memcpy(*tsync_protos, buf, length);
-	*tsync_protos_size = length;
+	struct tracecmd_tsync_protos *plist = NULL;
+	int count = 0;
+	char *p;
+	int i, j;
 
+	i = length;
+	p = buf;
+	while (i > 0) {
+		i -= strlen(p) + 1;
+		count++;
+		p += strlen(p) + 1;
+	}
+
+	plist = calloc(1, sizeof(struct tracecmd_tsync_protos));
+	if (!plist)
+		goto error;
+	plist->names = calloc(count + 1, sizeof(char *));
+	if (!plist->names)
+		goto error;
+	i = length;
+	p = buf;
+	j = 0;
+	while (i > 0 && j < (count - 1)) {
+		i -= strlen(p) + 1;
+		plist->names[j++] = strdup(p);
+		p += strlen(p) + 1;
+	}
+
+	*protos = plist;
 	return 0;
+error:
+	if (plist) {
+		free(plist->names);
+		free(plist);
+	}
+	return -1;
 }
 
 static int get_trace_req_args(char *buf, int length, int *argc, char ***argv)
@@ -1026,8 +1065,7 @@ out:
 int tracecmd_msg_recv_trace_req(struct tracecmd_msg_handle *msg_handle,
 				int *argc, char ***argv, bool *use_fifos,
 				unsigned long long *trace_id,
-				char **tsync_protos,
-				unsigned int *tsync_protos_size)
+				struct tracecmd_tsync_protos **protos)
 {
 	struct tracecmd_msg msg;
 	unsigned int param_id;
@@ -1069,8 +1107,7 @@ int tracecmd_msg_recv_trace_req(struct tracecmd_msg_handle *msg_handle,
 			ret = get_trace_req_args(p, param_length, argc, argv);
 			break;
 		case TRACE_REQUEST_TSYNC_PROTOS:
-			ret = get_trace_req_protos(p, param_length,
-						   tsync_protos, tsync_protos_size);
+			ret = get_trace_req_protos(p, param_length, protos);
 			break;
 		default:
 			break;
@@ -1095,7 +1132,8 @@ out:
 /**
  * tracecmd_msg_send_time_sync - Send a time sync packet
  * @msg_handle: message handle, holding the communication context
- * @sync_protocol: id of the time synch protocol
+ * @sync_protocol: name of the time synch protocol, string up to
+ *		   TRACECMD_TSYNC_PNAME_LENGTH characters length.
  * @sync_msg_id: id if the time synch message, protocol dependent
  * @payload_size: size of the packet payload, 0 in case of no payload
  * @payload: pointer to the packet payload, or NULL in case of no payload
@@ -1103,14 +1141,13 @@ out:
  * Returns 0 if packet is sent successfully, or negative error otherwise.
  */
 int tracecmd_msg_send_time_sync(struct tracecmd_msg_handle *msg_handle,
-				unsigned int sync_protocol,
-				unsigned int sync_msg_id,
+				char *sync_protocol, unsigned int sync_msg_id,
 				unsigned int payload_size, char *payload)
 {
 	struct tracecmd_msg msg;
 
 	tracecmd_msg_init(MSG_TIME_SYNC, &msg);
-	msg.tsync.sync_protocol = htonl(sync_protocol);
+	strncpy(msg.tsync.sync_protocol_name, sync_protocol, TRACECMD_TSYNC_PNAME_LENGTH);
 	msg.tsync.sync_msg_id = htonl(sync_msg_id);
 	msg.hdr.size = htonl(ntohl(msg.hdr.size) + payload_size);
 
@@ -1121,7 +1158,9 @@ int tracecmd_msg_send_time_sync(struct tracecmd_msg_handle *msg_handle,
 /**
  * tracecmd_msg_recv_time_sync - Receive a time sync packet
  * @msg_handle: message handle, holding the communication context
- * @sync_protocol: return the id of the packet's time synch protocol
+ * @sync_protocol: return the name of the packet's time synch protocol.
+ *		   It must point to a prealocated buffer with size
+ *		   TRACECMD_TSYNC_PNAME_LENGTH
  * @sync_msg_id: return the id of the packet's time synch message
  * @payload_size: size of the packet's payload, can be:
  *		 NULL - the payload is not interested and should be ignored
@@ -1146,7 +1185,7 @@ int tracecmd_msg_send_time_sync(struct tracecmd_msg_handle *msg_handle,
  * Returns 0 if packet is received successfully, or negative error otherwise.
  */
 int tracecmd_msg_recv_time_sync(struct tracecmd_msg_handle *msg_handle,
-				unsigned int *sync_protocol,
+				char *sync_protocol,
 				unsigned int *sync_msg_id,
 				unsigned int *payload_size, char **payload)
 {
@@ -1165,7 +1204,8 @@ int tracecmd_msg_recv_time_sync(struct tracecmd_msg_handle *msg_handle,
 	}
 
 	if (sync_protocol)
-		*sync_protocol = ntohl(msg.tsync.sync_protocol);
+		strncpy(sync_protocol, msg.tsync.sync_protocol_name,
+				TRACECMD_TSYNC_PNAME_LENGTH);
 	if (sync_msg_id)
 		*sync_msg_id = ntohl(msg.tsync.sync_msg_id);
 
@@ -1202,10 +1242,13 @@ out:
 static int make_trace_resp(struct tracecmd_msg *msg, int page_size, int nr_cpus,
 			   unsigned int *ports, bool use_fifos,
 			   unsigned long long trace_id,
-			   unsigned int tsync_proto,
+			   const char *tsync_proto,
 			   unsigned int tsync_port)
 {
 	int data_size;
+
+	if (!tsync_proto)
+		tsync_proto = "";
 
 	data_size = write_uints(NULL, 0, ports, nr_cpus);
 	msg->buf = malloc(data_size);
@@ -1216,7 +1259,7 @@ static int make_trace_resp(struct tracecmd_msg *msg, int page_size, int nr_cpus,
 	msg->hdr.size = htonl(ntohl(msg->hdr.size) + data_size);
 	msg->trace_resp.flags = use_fifos ? MSG_TRACE_USE_FIFOS : 0;
 	msg->trace_resp.flags = htonl(msg->trace_resp.flags);
-	msg->trace_resp.tsync_proto = htonl(tsync_proto);
+	strncpy(msg->trace_resp.tsync_proto_name, tsync_proto, TRACECMD_TSYNC_PNAME_LENGTH);
 	msg->trace_resp.tsync_port = htonl(tsync_port);
 
 	msg->trace_resp.cpus = htonl(nr_cpus);
@@ -1230,8 +1273,7 @@ int tracecmd_msg_send_trace_resp(struct tracecmd_msg_handle *msg_handle,
 				 int nr_cpus, int page_size,
 				 unsigned int *ports, bool use_fifos,
 				 unsigned long long trace_id,
-				 unsigned int tsync_proto,
-				 unsigned int tsync_port)
+				 const char *tsync_proto, unsigned int tsync_port)
 {
 	struct tracecmd_msg msg;
 	int ret;
@@ -1249,7 +1291,7 @@ int tracecmd_msg_recv_trace_resp(struct tracecmd_msg_handle *msg_handle,
 				 int *nr_cpus, int *page_size,
 				 unsigned int **ports, bool *use_fifos,
 				 unsigned long long *trace_id,
-				 unsigned int *tsync_proto,
+				 char **tsync_proto,
 				 unsigned int *tsync_port)
 {
 	struct tracecmd_msg msg;
@@ -1276,7 +1318,7 @@ int tracecmd_msg_recv_trace_resp(struct tracecmd_msg_handle *msg_handle,
 	*nr_cpus = ntohl(msg.trace_resp.cpus);
 	*page_size = ntohl(msg.trace_resp.page_size);
 	*trace_id = ntohll(msg.trace_resp.trace_id);
-	*tsync_proto = ntohl(msg.trace_resp.tsync_proto);
+	*tsync_proto = strdup(msg.trace_resp.tsync_proto_name);
 	*tsync_port = ntohl(msg.trace_resp.tsync_port);
 	*ports = calloc(*nr_cpus, sizeof(**ports));
 	if (!*ports) {

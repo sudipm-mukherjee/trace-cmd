@@ -6,7 +6,7 @@ project(kernel-shark)
 
 set(KS_APP_NAME "kernelshark")
 set(KS_VERSION_MAJOR 1)
-set(KS_VERSION_MINOR 1)
+set(KS_VERSION_MINOR 2)
 set(KS_VERSION_PATCH 0)
 set(KS_VERSION_STRING ${KS_VERSION_MAJOR}.${KS_VERSION_MINOR}.${KS_VERSION_PATCH})
 message("\n project: Kernel Shark: (version: ${KS_VERSION_STRING})\n")
@@ -81,6 +81,7 @@ include_directories(${KS_DIR}/src/
                     ${KS_DIR}/build/src/
                     ${JSONC_INCLUDE_DIR}
                     ${TRACECMD_INCLUDE_DIR}
+                    ${TRACECMD_PRIVATE_INCLUDE_DIR}
                     ${TRACEFS_INCLUDE_DIR})
 
 message("")

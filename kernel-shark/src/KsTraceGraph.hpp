@@ -28,7 +28,10 @@ public:
 	 * Reimplemented handler for mouse wheel events. All mouse wheel
 	 * events will be ignored.
 	 */
-	void wheelEvent(QWheelEvent *evt) {evt->ignore();}
+	void wheelEvent(QWheelEvent *evt) {
+		if (QApplication::keyboardModifiers() != Qt::ControlModifier)
+			QScrollArea::wheelEvent(evt);
+	}
 };
 
 /**
@@ -107,6 +110,8 @@ private:
 	void _selfUpdate();
 
 	void _markerReDraw();
+
+	QString _t2str(uint64_t sec, uint64_t usec);
 
 	enum class GraphActions {
 		ZoomIn,

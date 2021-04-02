@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: GPL-2.0
 
 include $(src)/scripts/utils.mk
 
@@ -9,9 +10,7 @@ OBJS =
 OBJS += trace-utest.o
 OBJS += tracefs-utest.o
 
-LIBS += -lcunit				\
-	-L$(LIBTRACEFS_DIR) -ltracefs	\
-	-L$(LIBTRACEEVENT_DIR) -ltraceevent
+LIBS += -lcunit $(LIBTRACEEVENT_LDLAGS) $(LIBTRACEFS_LDLAGS)
 
 OBJS := $(OBJS:%.o=$(bdir)/%.o)
 DEPS := $(OBJS:$(bdir)/%.o=$(bdir)/.%.d)

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -180,7 +181,9 @@ static struct usage_help usage_help[] = {
 	{
 		"clear",
 		"clear the trace buffers",
-		" %s clear\n"
+		" %s clear [-B buf][-a]\n"
+		"          -B clear the given buffer (may specify multiple -B)\n"
+		"          -a clear all existing buffers, including the top level one\n"
 	},
 	{
 		"report",
@@ -226,7 +229,8 @@ static struct usage_help usage_help[] = {
 		"                     to convert the displayed timestamps to seconds\n"
 		"                     Affects the previous data file, unless there was no\n"
 		"                     previous data file, in which case it becomes default\n"
-		"           --ts-diff Show the delta timestamp between events.\n"
+		"          --ts-diff Show the delta timestamp between events.\n"
+		"          --ts-check Check to make sure no time stamp on any CPU goes backwards.\n"
 	},
 	{
 		"stream",

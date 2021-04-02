@@ -461,7 +461,7 @@ static void print_list(void)
 
 static void do_trace_mem(struct tracecmd_input *handle)
 {
-	struct tep_handle *pevent = tracecmd_get_pevent(handle);
+	struct tep_handle *pevent = tracecmd_get_tep(handle);
 	struct tep_record *record;
 	struct tep_event *event;
 	int missed_events = 0;
@@ -508,7 +508,7 @@ static void do_trace_mem(struct tracecmd_input *handle)
 			missed_events = 1;
 
 		process_record(pevent, record);
-		free_record(record);
+		tracecmd_free_record(record);
 	}
 
 	sort_list();
@@ -550,11 +550,11 @@ void trace_mem(int argc, char **argv)
 	if (!input_file)
 		input_file = DEFAULT_INPUT_FILE;
 
-	handle = tracecmd_alloc(input_file);
+	handle = tracecmd_alloc(input_file, 0);
 	if (!handle)
 		die("can't open %s\n", input_file);
 
-	ret = tracecmd_read_headers(handle);
+	ret = tracecmd_read_headers(handle, 0);
 	if (ret)
 		return;
 

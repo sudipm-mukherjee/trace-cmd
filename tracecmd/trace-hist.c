@@ -933,7 +933,7 @@ static void print_chains(struct tep_handle *pevent)
 
 static void do_trace_hist(struct tracecmd_input *handle)
 {
-	struct tep_handle *pevent = tracecmd_get_pevent(handle);
+	struct tep_handle *pevent = tracecmd_get_tep(handle);
 	struct tep_record *record;
 	struct tep_event *event;
 	int cpus;
@@ -985,7 +985,7 @@ static void do_trace_hist(struct tracecmd_input *handle)
 				flush_stack();
 
 			process_record(pevent, record);
-			free_record(record);
+			tracecmd_free_record(record);
 		}
 	}
 
@@ -1039,11 +1039,11 @@ void trace_hist(int argc, char **argv)
 	if (!input_file)
 		input_file = DEFAULT_INPUT_FILE;
 
-	handle = tracecmd_alloc(input_file);
+	handle = tracecmd_alloc(input_file, 0);
 	if (!handle)
 		die("can't open %s\n", input_file);
 
-	ret = tracecmd_read_headers(handle);
+	ret = tracecmd_read_headers(handle, 0);
 	if (ret)
 		return;
 

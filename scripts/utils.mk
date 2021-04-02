@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: GPL-2.0
 
 # Utils
 
@@ -29,7 +30,12 @@ ifeq ($(findstring 1,$(SILENT)$(VERBOSE)),1)
   print_plugin_obj_compile =
   print_plugin_build =
   print_install =
+  print_uninstall =
   print_update =
+  print_asciidoc =
+  print_xsltproc =
+  print_install =
+  hide_xsltproc_output =
 else
   print_compile =		echo '  $(GUI)COMPILE            '$(GOBJ);
   print_app_build =		echo '  $(GUI)BUILD              '$(GOBJ);
@@ -40,6 +46,11 @@ else
   print_static_lib_build =	echo '  $(GUI)BUILD STATIC LIB   '$(GOBJ);
   print_install =		echo '  $(GUI)INSTALL     '$(GSPACE)$1'	to	$(DESTDIR_SQ)$2';
   print_update =		echo '  $(GUI)UPDATE             '$(GOBJ);
+  print_uninstall =		echo '  $(GUI)UNINSTALLING $(DESTDIR_SQ)$1';
+  print_asciidoc =		echo '  ASCIIDOC            '`basename $@`;
+  print_xsltproc =		echo '  XSLTPROC            '`basename $@`;
+  print_install =		echo '  INSTALL             '`basename $1`'	to	$(DESTDIR_SQ)'$2;
+  hide_xsltproc_output = 2> /dev/null
 endif
 
 do_fpic_compile =					\
@@ -53,7 +64,7 @@ do_compile =							\
 
 do_app_build =						\
 	($(print_app_build)				\
-	$(CC) $^ -rdynamic -o $@ $(LDFLAGS) $(CONFIG_LIBS) $(LIBS))
+	$(CC) $^ -rdynamic -Wl,-rpath=$(libdir) -o $@ $(LDFLAGS) $(CONFIG_LIBS) $(LIBS))
 
 do_build_static_lib =				\
 	($(print_static_lib_build)		\
@@ -61,7 +72,7 @@ do_build_static_lib =				\
 
 do_compile_shared_library =			\
 	($(print_shared_lib_compile)		\
-	$(CC) --shared $^ $(LIBS) -Wl,-soname,$(@F) -o $@)
+	$(CC) --shared $^ '-Wl,-soname,$(@F),-rpath=$$ORIGIN' -o $@ $(LIBS))
 
 do_compile_plugin_obj =				\
 	($(print_plugin_obj_compile)		\
@@ -118,12 +129,22 @@ define update_dir
 	fi);
 endef
 
+define build_prefix
+	(echo $1 > $@.tmp;	\
+	if [ -r $@ ] && cmp -s $@ $@.tmp; then				\
+		rm -f $@.tmp;						\
+	else								\
+		$(print_update)						\
+		mv -f $@.tmp $@;					\
+	fi);
+endef
+
 define do_install
 	$(print_install)				\
 	if [ ! -d '$(DESTDIR_SQ)$2' ]; then		\
 		$(INSTALL) -d -m 755 '$(DESTDIR_SQ)$2';	\
 	fi;						\
-	$(INSTALL) $1 '$(DESTDIR_SQ)$2'
+	$(INSTALL) $(if $3,-m $3,) $1 '$(DESTDIR_SQ)$2'
 endef
 
 define do_install_data
@@ -134,12 +155,53 @@ define do_install_data
 	$(INSTALL) -m 644 $1 '$(DESTDIR_SQ)$2'
 endef
 
-define do_install_ld
-	if [ -d '$(DESTDIR_SQ)$2' ]; then				\
-		$(print_install)					\
-		if ! grep -q $3 $(DESTDIR_SQ)$2/$1 2>/dev/null; then	\
-			echo '$3' >> $(DESTDIR_SQ)$2/$1;		\
-			ldconfig;					\
-		fi							\
+define do_install_pkgconfig_file
+	if [ -n "${pkgconfig_dir}" ]; then 					\
+		$(call do_install,$(PKG_CONFIG_FILE),$(pkgconfig_dir),644); 	\
+	else 									\
+		(echo Failed to locate pkg-config directory) 1>&2;		\
 	fi
+endef
+
+define do_make_pkgconfig_file
+	$(print_app_build)
+	$(Q)cp -f $(srctree)/${PKG_CONFIG_SOURCE_FILE}.template ${PKG_CONFIG_FILE};	\
+	sed -i "s|INSTALL_PREFIX|${1}|g" ${PKG_CONFIG_FILE}; 		\
+	sed -i "s|LIB_VERSION|${LIBTRACECMD_VERSION}|g" ${PKG_CONFIG_FILE}; \
+	sed -i "s|LIB_DIR|$(libdir)|g" ${PKG_CONFIG_FILE}; \
+	sed -i "s|HEADER_DIR|$(includedir)/trace-cmd|g" ${PKG_CONFIG_FILE};
+endef
+
+define manpage.xsl
+	if [ -z ${MANPAGE_DOCBOOK_XSL} ]; then 			\
+		echo "*********************************";	\
+		echo "** No docbook.xsl is installed **";	\
+		echo "** Can't make man pages        **";	\
+		echo "*********************************";	\
+		exit 1;						\
+	fi
+endef
+
+do_asciidoc_build =				\
+	($(print_asciidoc)			\
+	 asciidoc -d manpage -b docbook -o $@ $<)
+
+do_xsltproc_build =				\
+	($(print_xsltproc)			\
+	 xsltproc --nonet -o $@ ${MANPAGE_DOCBOOK_XSL} $< $(hide_xsltproc_output))
+
+#
+# asciidoc requires a synopsis, but file format man pages (5) do
+# not require them. This removes it from the file in the final step.
+define remove_synopsis
+	(sed -e '/^\.SH "SYNOPSIS"/,/ignore/d' $1 > $1.tmp;\
+	 mv $1.tmp $1)
+endef
+
+define do_install_docs
+	$(print_install)				\
+	if [ ! -d '$(DESTDIR_SQ)$2' ]; then		\
+		$(INSTALL) -d -m 755 '$(DESTDIR_SQ)$2';	\
+	fi;						\
+	$(INSTALL) -m 644 $1 '$(DESTDIR_SQ)$2'
 endef

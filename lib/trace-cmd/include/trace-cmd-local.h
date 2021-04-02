@@ -6,8 +6,13 @@
 #ifndef _TRACE_CMD_LOCAL_H
 #define _TRACE_CMD_LOCAL_H
 
+#include <byteswap.h>
+#include "trace-cmd-private.h"
+
 /* Can be overridden */
 void warning(const char *fmt, ...);
+
+#define __packed __attribute__((packed))
 
 /* trace.dat file format version */
 #define FILE_VERSION 6

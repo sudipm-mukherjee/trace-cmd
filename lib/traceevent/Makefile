@@ -1,10 +1,16 @@
-
+# SPDX-License-Identifier: GPL-2.0
 
 include $(src)/scripts/utils.mk
 
 bdir:=$(obj)/lib/traceevent
 
 DEFAULT_TARGET = $(bdir)/libtraceevent.a
+
+LIBTRACEEVENT_CFLAGS = -I$(src)/include/traceevent -I$(src)/lib/traceevent/include
+
+CFLAGS += -I$(bdir)/include
+
+CFLAGS := $(LIBTRACEEVENT_CFLAGS) $(CFLAGS)
 
 OBJS =
 OBJS += event-parse.o
@@ -27,11 +33,24 @@ $(bdir):
 $(OBJS): | $(bdir)
 $(DEPS): | $(bdir)
 
+.PHONY: warning
+warning:
+	@echo "********************************************"
+	@echo "** NOTICE: libtraceevent not found on system"
+	@echo "**"
+	@echo "** Building obsolete local version of libtraceevent"
+	@echo "** Consider installing the latest libtraceevent"
+	@echo "**"
+	@echo "**  https://git.kernel.org/pub/scm/libs/libtrace/libtraceevent.git/ "
+	@echo "**"
+	@echo "********************************************"
+
 $(bdir)/libtraceevent.a: $(OBJS)
 	$(Q)$(call do_build_static_lib)
 
-$(bdir)/libtraceevent.so: $(OBJS)
-	$(Q)$(call do_compile_shared_library)
+libtraceevent: $(bdir)/libtraceevent.a warning
+
+libtraceevent_nowarn: $(bdir)/libtraceevent.a
 
 $(bdir)/%.o: %.c
 	$(Q)$(call do_fpic_compile)
@@ -48,6 +67,6 @@ ifneq ($(dep_includes),)
 endif
 
 clean:
-	$(RM) -f $(bdir)/*.a $(bdir)/*.so $(bdir)/*.o $(bdir)/.*.d
+	$(RM) -f $(bdir)/*.a $(bdir)/*.o $(bdir)/.*.d
 
 .PHONY: clean

@@ -18,25 +18,34 @@
 
 #define TRACEFS_SUITE		"trasefs library"
 #define TEST_INSTANCE_NAME	"cunit_test_iter"
-#define TEST_ARRAY_SIZE		50
+#define TEST_ARRAY_SIZE		500
 
 static struct tracefs_instance *test_instance;
 static struct tep_handle *test_tep;
-static int test_array[TEST_ARRAY_SIZE];
+struct test_sample {
+	int cpu;
+	int value;
+};
+static struct test_sample test_array[TEST_ARRAY_SIZE];
 static int test_found;
 
 static int test_callback(struct tep_event *event, struct tep_record *record,
 			  int cpu, void *context)
 {
 	struct tep_format_field *field;
-	int val, i;
+	struct test_sample *sample;
+	int *cpu_test = (int *)context;
+	int i;
 
+	if (cpu_test && *cpu_test >= 0 && *cpu_test != cpu)
+		return 0;
 	field = tep_find_field(event, "buf");
 	if (field) {
-		val = *((int *)(record->data + field->offset));
+		sample = ((struct test_sample *)(record->data + field->offset));
 		for (i = 0; i < TEST_ARRAY_SIZE; i++) {
-			if (test_array[i] == val) {
-				test_array[i] = 0;
+			if (test_array[i].value == sample->value &&
+			    test_array[i].cpu == cpu) {
+				test_array[i].value = 0;
 				test_found++;
 				break;
 			}
@@ -48,43 +57,85 @@ static int test_callback(struct tep_event *event, struct tep_record *record,
 
 static void test_iter_write(void)
 {
+	int cpus = sysconf(_SC_NPROCESSORS_CONF);
+	cpu_set_t *cpuset, *cpusave;
+	int cpu_size;
 	char *path;
 	int i, fd;
 	int ret;
+	cpuset = CPU_ALLOC(cpus);
+	cpusave = CPU_ALLOC(cpus);
+	cpu_size = CPU_ALLOC_SIZE(cpus);
+	CPU_ZERO_S(cpu_size, cpuset);
+
+	sched_getaffinity(0, cpu_size, cpusave);
 
 	path = tracefs_instance_get_file(test_instance, "trace_marker");
 	CU_TEST(path != NULL);
 	fd = open(path, O_WRONLY);
+	tracefs_put_tracing_file(path);
 	CU_TEST(fd >= 0);
 
 	for (i = 0; i < TEST_ARRAY_SIZE; i++) {
-		test_array[i] = random();
-		ret = write(fd, test_array + i, sizeof(int));
-		CU_TEST(ret == sizeof(int));
+		test_array[i].cpu = rand() % cpus;
+		test_array[i].value = random();
+		if (!test_array[i].value)
+			test_array[i].value++;
+		CU_TEST(test_array[i].cpu < cpus);
+		CPU_ZERO_S(cpu_size, cpuset);
+		CPU_SET(test_array[i].cpu, cpuset);
+		sched_setaffinity(0, cpu_size, cpuset);
+		ret = write(fd, test_array + i, sizeof(struct test_sample));
+		CU_TEST(ret == sizeof(struct test_sample));
 	}
 
-	tracefs_put_tracing_file(path);
+	sched_setaffinity(0, cpu_size, cpusave);
 	close(fd);
 }
 
 
-static void test_iter_raw_events(void)
+static void iter_raw_events_on_cpu(int cpu)
 {
+	int check = 0;
 	int ret;
-
-	ret = tracefs_iterate_raw_events(NULL, test_instance, test_callback, NULL);
-	CU_TEST(ret < 0);
-	ret = tracefs_iterate_raw_events(test_tep, NULL, test_callback, NULL);
-	CU_TEST(ret == 0);
-	ret = tracefs_iterate_raw_events(test_tep, test_instance, NULL, NULL);
-	CU_TEST(ret < 0);
+	int i;
 
 	test_found = 0;
 	test_iter_write();
-	ret = tracefs_iterate_raw_events(test_tep, test_instance,
-					 test_callback, NULL);
+	ret = tracefs_iterate_raw_events(test_tep, test_instance, NULL, 0,
+					 test_callback, &cpu);
 	CU_TEST(ret == 0);
-	CU_TEST(test_found == TEST_ARRAY_SIZE);
+	if (cpu < 0) {
+		CU_TEST(test_found == TEST_ARRAY_SIZE);
+	} else {
+		for (i = 0; i < TEST_ARRAY_SIZE; i++) {
+			if (test_array[i].cpu == cpu) {
+				check++;
+				CU_TEST(test_array[i].value == 0)
+			} else {
+				CU_TEST(test_array[i].value != 0)
+			}
+		}
+		CU_TEST(test_found == check);
+	}
+}
+
+static void test_iter_raw_events(void)
+{
+	int cpus = sysconf(_SC_NPROCESSORS_CONF);
+	int ret;
+	int i;
+
+	ret = tracefs_iterate_raw_events(NULL, test_instance, NULL, 0, test_callback, NULL);
+	CU_TEST(ret < 0);
+	ret = tracefs_iterate_raw_events(test_tep, NULL, NULL, 0, test_callback, NULL);
+	CU_TEST(ret == 0);
+	ret = tracefs_iterate_raw_events(test_tep, test_instance, NULL, 0, NULL, NULL);
+	CU_TEST(ret < 0);
+
+	iter_raw_events_on_cpu(-1);
+	for (i = 0; i < cpus; i++)
+		iter_raw_events_on_cpu(i);
 }
 
 #define RAND_STR_SIZE 20
@@ -111,20 +162,11 @@ static void test_trace_file(void)
 	const char *tdir;
 	struct stat st;
 	char *file;
-	char *dir;
 
-	dir = tracefs_find_tracing_dir();
-	CU_TEST(dir != NULL);
-	CU_TEST(stat(dir, &st) == 0);
-	CU_TEST(S_ISDIR(st.st_mode));
-
-	tdir  = tracefs_get_tracing_dir();
+	tdir  = tracefs_tracing_dir();
 	CU_TEST(tdir != NULL);
 	CU_TEST(stat(tdir, &st) == 0);
 	CU_TEST(S_ISDIR(st.st_mode));
-
-	CU_TEST(strcmp(dir, tdir) == 0);
-	free(dir);
 
 	file = tracefs_get_tracing_file(NULL);
 	CU_TEST(file == NULL);
@@ -141,7 +183,7 @@ static void test_trace_file(void)
 
 static void test_instance_file_read(struct tracefs_instance *inst, char *fname)
 {
-	const char *tdir  = tracefs_get_tracing_dir();
+	const char *tdir  = tracefs_tracing_dir();
 	char buf[BUFSIZ];
 	char *fpath;
 	char *file;
@@ -179,8 +221,9 @@ static void test_instance_file_read(struct tracefs_instance *inst, char *fname)
 static void test_instance_file(void)
 {
 	struct tracefs_instance *instance = NULL;
+	struct tracefs_instance *second = NULL;
 	const char *name = get_rand_str();
-	char *inst_name = NULL;
+	const char *inst_name = NULL;
 	const char *tdir;
 	char *inst_file;
 	char *inst_dir;
@@ -192,21 +235,25 @@ static void test_instance_file(void)
 	int size;
 	int ret;
 
-	tdir  = tracefs_get_tracing_dir();
+	tdir  = tracefs_tracing_dir();
 	CU_TEST(tdir != NULL);
 	CU_TEST(asprintf(&inst_dir, "%s/instances/%s", tdir, name) > 0);
 	CU_TEST(stat(inst_dir, &st) != 0);
 
-	instance = tracefs_instance_alloc(name);
+	CU_TEST(tracefs_instance_exists(name) == false);
+	instance = tracefs_instance_create(name);
 	CU_TEST(instance != NULL);
-	CU_TEST(stat(inst_dir, &st) != 0);
+	CU_TEST(tracefs_instance_is_new(instance));
+	second = tracefs_instance_create(name);
+	CU_TEST(second != NULL);
+	CU_TEST(!tracefs_instance_is_new(second));
+	tracefs_instance_free(second);
+	CU_TEST(tracefs_instance_exists(name) == true);
+	CU_TEST(stat(inst_dir, &st) == 0);
+	CU_TEST(S_ISDIR(st.st_mode));
 	inst_name = tracefs_instance_get_name(instance);
 	CU_TEST(inst_name != NULL);
 	CU_TEST(strcmp(inst_name, name) == 0);
-
-	CU_TEST(tracefs_instance_create(instance) == 0);
-	CU_TEST(stat(inst_dir, &st) == 0);
-	CU_TEST(S_ISDIR(st.st_mode));
 
 	fname = tracefs_instance_get_dir(NULL);
 	CU_TEST(fname != NULL);
@@ -313,7 +360,7 @@ static void test_system_event(void)
 	char **events;
 	char *sdir = NULL;
 
-	tdir  = tracefs_get_tracing_dir();
+	tdir  = tracefs_tracing_dir();
 	CU_TEST(tdir != NULL);
 
 	systems = tracefs_event_systems(tdir);
@@ -346,7 +393,7 @@ static void test_tracers(void)
 	char *tracer;
 	int i;
 
-	tdir  = tracefs_get_tracing_dir();
+	tdir  = tracefs_tracing_dir();
 	CU_TEST(tdir != NULL);
 
 	tracers = tracefs_tracers(tdir);
@@ -377,7 +424,7 @@ static void test_check_events(struct tep_handle *tep, char *system, bool exist)
 	DIR *dir;
 	int fd;
 
-	tdir  = tracefs_get_tracing_dir();
+	tdir  = tracefs_tracing_dir();
 	CU_TEST(tdir != NULL);
 
 	asprintf(&edir, "%s/events/%s", tdir, system);
@@ -414,7 +461,7 @@ static void test_local_events(void)
 	char *lsystems[3];
 	int i;
 
-	tdir  = tracefs_get_tracing_dir();
+	tdir  = tracefs_tracing_dir();
 	CU_TEST(tdir != NULL);
 
 	tep = tracefs_local_events(tdir);
@@ -457,6 +504,82 @@ static void test_local_events(void)
 	tracefs_list_free(systems);
 }
 
+struct test_walk_instance {
+	struct tracefs_instance *instance;
+	bool found;
+};
+#define WALK_COUNT 10
+int test_instances_walk_cb(const char *name, void *data)
+{
+	struct test_walk_instance *instances  = (struct test_walk_instance *)data;
+	int i;
+
+	CU_TEST(instances != NULL);
+	CU_TEST(name != NULL);
+
+	for (i = 0; i < WALK_COUNT; i++) {
+		if (!strcmp(name,
+			    tracefs_instance_get_name(instances[i].instance))) {
+			instances[i].found = true;
+			break;
+		}
+	}
+
+	return 0;
+}
+
+static void test_instances_walk(void)
+{
+	struct test_walk_instance instances[WALK_COUNT];
+	int i;
+
+	memset(instances, 0, WALK_COUNT * sizeof(struct test_walk_instance));
+	for (i = 0; i < WALK_COUNT; i++) {
+		instances[i].instance = tracefs_instance_create(get_rand_str());
+		CU_TEST(instances[i].instance != NULL);
+	}
+
+	CU_TEST(tracefs_instances_walk(test_instances_walk_cb, instances) == 0);
+	for (i = 0; i < WALK_COUNT; i++) {
+		CU_TEST(instances[i].found);
+		tracefs_instance_destroy(instances[i].instance);
+		instances[i].found = false;
+	}
+
+	CU_TEST(tracefs_instances_walk(test_instances_walk_cb, instances) == 0);
+	for (i = 0; i < WALK_COUNT; i++) {
+		CU_TEST(!instances[i].found);
+		tracefs_instance_free(instances[i].instance);
+	}
+}
+
+static void current_clock_check(const char *clock)
+{
+	int size = 0;
+	char *clocks;
+	char *str;
+
+	clocks = tracefs_instance_file_read(test_instance, "trace_clock", &size);
+	CU_TEST(clocks != NULL);
+	CU_TEST(size > strlen(clock));
+	str = strstr(clocks, clock);
+	CU_TEST(str != NULL);
+	CU_TEST(str != clocks);
+	CU_TEST(*(str - 1) == '[');
+	CU_TEST(*(str + strlen(clock)) == ']');
+	free(clocks);
+}
+
+static void test_get_clock(void)
+{
+	const char *clock;
+
+	clock = tracefs_get_clock(test_instance);
+	CU_TEST(clock != NULL);
+	current_clock_check(clock);
+	free((char *)clock);
+}
+
 static int test_suite_destroy(void)
 {
 	tracefs_instance_destroy(test_instance);
@@ -472,12 +595,8 @@ static int test_suite_init(void)
 	test_tep = tracefs_local_events_system(NULL, systems);
 	if (test_tep == NULL)
 		return 1;
-
-	test_instance = tracefs_instance_alloc(TEST_INSTANCE_NAME);
-	if (test_instance == NULL)
-		return 1;
-
-	if (tracefs_instance_create(test_instance) < 0)
+	test_instance = tracefs_instance_create(TEST_INSTANCE_NAME);
+	if (!test_instance)
 		return 1;
 
 	return 0;
@@ -504,4 +623,8 @@ void test_tracefs_lib(void)
 		    test_tracers);
 	CU_add_test(suite, "tracefs_local events API",
 		    test_local_events);
+	CU_add_test(suite, "tracefs_instances_walk API",
+		    test_instances_walk);
+	CU_add_test(suite, "tracefs_get_clock API",
+		    test_get_clock);
 }

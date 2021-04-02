@@ -94,6 +94,8 @@ void trace_restore (int argc, char **argv)
 							    kallsyms);
 		if (!handle)
 			die("Unabled to create output file %s", output);
+		if (tracecmd_write_cmdlines(handle) < 0)
+			die("Failed to write command lines");
 		tracecmd_output_close(handle);
 		exit(0);
 	}
@@ -116,11 +118,11 @@ void trace_restore (int argc, char **argv)
 	if (input) {
 		struct tracecmd_input *ihandle;
 
-		ihandle = tracecmd_alloc(input);
+		ihandle = tracecmd_alloc(input, 0);
 		if (!ihandle)
 			die("error reading file %s", input);
 		/* make sure headers are ok */
-		if (tracecmd_read_headers(ihandle) < 0)
+		if (tracecmd_read_headers(ihandle, TRACECMD_FILE_CMD_LINES) < 0)
 			die("error reading file %s headers", input);
 
 		handle = tracecmd_copy(ihandle, output);

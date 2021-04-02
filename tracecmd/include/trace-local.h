@@ -8,8 +8,10 @@
 
 #include <sys/types.h>
 #include <dirent.h>	/* for DIR */
+#include <ctype.h>	/* for isdigit() */
+#include <limits.h>
 
-#include "trace-cmd.h"
+#include "trace-cmd-private.h"
 #include "event-utils.h"
 
 #define TRACE_AGENT_DEFAULT_PORT	823
@@ -44,7 +46,7 @@ struct pid_record_data {
 
 void show_file(const char *name);
 
-struct tracecmd_input *read_trace_header(const char *file);
+struct tracecmd_input *read_trace_header(const char *file, int flags);
 int read_trace_files(void);
 
 void trace_record(int argc, char **argv);
@@ -199,6 +201,7 @@ struct filter_pids {
 
 struct buffer_instance {
 	struct buffer_instance	*next;
+	char			*name;
 	struct tracefs_instance	*tracefs;
 	unsigned long long	trace_id;
 	char			*cpumask;
@@ -259,9 +262,8 @@ struct buffer_instance {
 	int			*fds;
 	bool			use_fifos;
 
-	pthread_t		tsync_thread;
-	bool			tsync_thread_running;
-	struct tracecmd_time_sync tsync;
+	int			tsync_loop_interval;
+	struct tracecmd_time_sync *tsync;
 };
 
 void init_top_instance(void);
@@ -277,16 +279,26 @@ extern struct buffer_instance *first_instance;
 #define is_agent(instance)	((instance)->flags & BUFFER_FL_AGENT)
 #define is_guest(instance)	((instance)->flags & BUFFER_FL_GUEST)
 
-struct buffer_instance *create_instance(const char *name);
+struct buffer_instance *allocate_instance(const char *name);
 void add_instance(struct buffer_instance *instance, int cpu_count);
 void update_first_instance(struct buffer_instance *instance, int topt);
 
 void show_instance_file(struct buffer_instance *instance, const char *name);
 
+struct trace_guest {
+	char *name;
+	int cid;
+	int pid;
+	int cpu_max;
+	int *cpu_pid;
+};
+struct trace_guest *get_guest_by_cid(unsigned int guest_cid);
+struct trace_guest *get_guest_by_name(char *name);
+void read_qemu_guests(void);
+int get_guest_pid(unsigned int guest_cid);
 int get_guest_vcpu_pid(unsigned int guest_cid, unsigned int guest_vcpu);
 
 /* moved from trace-cmd.h */
-void tracecmd_create_top_instance(char *name);
 void tracecmd_remove_instances(void);
 int tracecmd_add_event(const char *event_str, int stack);
 void tracecmd_enable_events(void);
@@ -298,9 +310,9 @@ void tracecmd_stat_cpu(struct trace_seq *s, int cpu);
 int tracecmd_host_tsync(struct buffer_instance *instance,
 			 unsigned int tsync_port);
 void tracecmd_host_tsync_complete(struct buffer_instance *instance);
-unsigned int tracecmd_guest_tsync(char *tsync_protos,
-				  unsigned int tsync_protos_size, char *clock,
-				  unsigned int *tsync_port, pthread_t *thr_id);
+const char *tracecmd_guest_tsync(struct tracecmd_tsync_protos *tsync_protos,
+				 char *clock, unsigned int *tsync_port,
+				 pthread_t *thr_id);
 
 int trace_make_vsock(unsigned int port);
 int trace_get_vsock_port(int sd, unsigned int *port);
@@ -313,5 +325,13 @@ void __noreturn die(const char *fmt, ...); /* Can be overriden */
 void *malloc_or_die(unsigned int size); /* Can be overridden */
 void __noreturn __die(const char *fmt, ...);
 void __noreturn _vdie(const char *fmt, va_list ap);
+
+static inline bool is_digits(const char *s)
+{
+	for (; *s; s++)
+		if (!isdigit(*s))
+			return false;
+	return true;
+}
 
 #endif /* __TRACE_LOCAL_H */

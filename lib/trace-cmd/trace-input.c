@@ -80,6 +80,7 @@ struct input_buffer_instance {
 struct ts_offset_sample {
 	long long	time;
 	long long	offset;
+	long long	scaling;
 };
 
 struct guest_trace_info {
@@ -92,14 +93,15 @@ struct guest_trace_info {
 
 struct host_trace_info {
 	unsigned long long	peer_trace_id;
+	unsigned int		flags;
 	bool			sync_enable;
-	struct tracecmd_input	*peer_data;
 	int			ts_samples_count;
 	struct ts_offset_sample	*ts_samples;
 };
 
 struct tracecmd_input {
 	struct tep_handle	*pevent;
+	unsigned long		file_state;
 	struct tep_plugin_list	*plugin_list;
 	struct tracecmd_input	*parent;
 	unsigned long		flags;
@@ -157,6 +159,11 @@ void tracecmd_clear_flag(struct tracecmd_input *handle, int flag)
 unsigned long tracecmd_get_flags(struct tracecmd_input *handle)
 {
 	return handle->flags;
+}
+
+enum tracecmd_file_states tracecmd_get_file_state(struct tracecmd_input *handle)
+{
+	return handle->file_state;
 }
 
 #if DEBUG_RECORD
@@ -341,6 +348,9 @@ static int read_header_files(struct tracecmd_input *handle)
 	char *header;
 	char buf[BUFSIZ];
 
+	if (handle->file_state >= TRACECMD_FILE_HEADERS)
+		return 0;
+
 	if (do_read_check(handle, buf, 12))
 		return -1;
 
@@ -386,6 +396,8 @@ static int read_header_files(struct tracecmd_input *handle)
 
 	handle->ftrace_files_start =
 		lseek64(handle->fd, 0, SEEK_CUR);
+
+	handle->file_state = TRACECMD_FILE_HEADERS;
 
 	return 0;
 
@@ -542,6 +554,9 @@ static int read_ftrace_files(struct tracecmd_input *handle, const char *regex)
 	int unique;
 	int ret;
 
+	if (handle->file_state >= TRACECMD_FILE_FTRACE_EVENTS)
+		return 0;
+
 	if (regex) {
 		sreg = &spreg;
 		ereg = &epreg;
@@ -588,6 +603,8 @@ static int read_ftrace_files(struct tracecmd_input *handle, const char *regex)
 		regfree(ereg);
 	}
 
+	handle->file_state = TRACECMD_FILE_FTRACE_EVENTS;
+
 	return 0;
 }
 
@@ -607,6 +624,9 @@ static int read_event_files(struct tracecmd_input *handle, const char *regex)
 	int sys_printed;
 	int unique;
 	int ret;
+
+	if (handle->file_state >= TRACECMD_FILE_ALL_EVENTS)
+		return 0;
 
 	if (regex) {
 		sreg = &spreg;
@@ -670,6 +690,8 @@ static int read_event_files(struct tracecmd_input *handle, const char *regex)
 		regfree(ereg);
 	}
 
+	handle->file_state = TRACECMD_FILE_ALL_EVENTS;
+
 	return 0;
 
  failed:
@@ -688,6 +710,9 @@ static int read_proc_kallsyms(struct tracecmd_input *handle)
 	unsigned int size;
 	char *buf;
 
+	if (handle->file_state >= TRACECMD_FILE_KALLSYMS)
+		return 0;
+
 	if (read4(handle, &size) < 0)
 		return -1;
 	if (!size)
@@ -705,6 +730,9 @@ static int read_proc_kallsyms(struct tracecmd_input *handle)
 	tracecmd_parse_proc_kallsyms(pevent, buf, size);
 
 	free(buf);
+
+	handle->file_state = TRACECMD_FILE_KALLSYMS;
+
 	return 0;
 }
 
@@ -712,6 +740,9 @@ static int read_ftrace_printk(struct tracecmd_input *handle)
 {
 	unsigned int size;
 	char *buf;
+
+	if (handle->file_state >= TRACECMD_FILE_PRINTK)
+		return 0;
 
 	if (read4(handle, &size) < 0)
 		return -1;
@@ -731,6 +762,8 @@ static int read_ftrace_printk(struct tracecmd_input *handle)
 	tracecmd_parse_ftrace_printk(handle->pevent, buf, size);
 
 	free(buf);
+
+	handle->file_state = TRACECMD_FILE_PRINTK;
 
 	return 0;
 }
@@ -754,11 +787,15 @@ static int read_cpus(struct tracecmd_input *handle)
 {
 	unsigned int cpus;
 
+	if (handle->file_state >= TRACECMD_FILE_CPU_COUNT)
+		return 0;
+
 	if (read4(handle, &cpus) < 0)
 		return -1;
 
 	handle->cpus = cpus;
 	tep_set_cpus(handle->pevent, handle->cpus);
+	handle->file_state = TRACECMD_FILE_CPU_COUNT;
 
 	return 0;
 }
@@ -766,14 +803,25 @@ static int read_cpus(struct tracecmd_input *handle)
 /**
  * tracecmd_read_headers - read the header information from trace.dat
  * @handle: input handle for the trace.dat file
+ * @state: The state to read up to or zero to read up to options.
  *
  * This reads the trace.dat file for various information. Like the
  * format of the ring buffer, event formats, ftrace formats, kallsyms
- * and printk.
+ * and printk. This may be called multiple times with different @state
+ * values, to read partial data at a time. It will always continue
+ * where it left off.
  */
-int tracecmd_read_headers(struct tracecmd_input *handle)
+int tracecmd_read_headers(struct tracecmd_input *handle,
+			  enum tracecmd_file_states state)
 {
 	int ret;
+
+	/* Set to read all if state is zero */
+	if (!state)
+		state = TRACECMD_FILE_OPTIONS;
+
+	if (state <= handle->file_state)
+		return 0;
 
 	handle->parsing_failures = 0;
 
@@ -781,32 +829,53 @@ int tracecmd_read_headers(struct tracecmd_input *handle)
 	if (ret < 0)
 		return -1;
 
+	tep_set_long_size(handle->pevent, handle->long_size);
+
+	if (state <= handle->file_state)
+		return 0;
+
 	ret = read_ftrace_files(handle, NULL);
 	if (ret < 0)
 		return -1;
+
+	if (state <= handle->file_state)
+		return 0;
 
 	ret = read_event_files(handle, NULL);
 	if (ret < 0)
 		return -1;
 
+	if (state <= handle->file_state)
+		return 0;
+
 	ret = read_proc_kallsyms(handle);
 	if (ret < 0)
 		return -1;
+
+	if (state <= handle->file_state)
+		return 0;
 
 	ret = read_ftrace_printk(handle);
 	if (ret < 0)
 		return -1;
 
+	if (state <= handle->file_state)
+		return 0;
+
 	if (read_and_parse_cmdlines(handle) < 0)
 		return -1;
+
+	if (state <= handle->file_state)
+		return 0;
 
 	if (read_cpus(handle) < 0)
 		return -1;
 
+	if (state <= handle->file_state)
+		return 0;
+
 	if (read_options_type(handle) < 0)
 		return -1;
-
-	tep_set_long_size(handle->pevent, handle->long_size);
 
 	return 0;
 }
@@ -935,7 +1004,7 @@ static void *allocate_page_map(struct tracecmd_input *handle,
 	page_map->map = mmap(NULL, map_size, PROT_READ, MAP_PRIVATE,
 			 handle->fd, map_offset);
 
-	if (page->map == MAP_FAILED) {
+	if (page_map->map == MAP_FAILED) {
 		/* Try a smaller map */
 		map_size >>= 1;
 		if (map_size < handle->page_size) {
@@ -1072,7 +1141,7 @@ static void __free_record(struct tep_record *record)
 	free(record);
 }
 
-void free_record(struct tep_record *record)
+void tracecmd_free_record(struct tep_record *record)
 {
 	if (!record)
 		return;
@@ -1116,19 +1185,31 @@ static void free_next(struct tracecmd_input *handle, int cpu)
 	handle->cpu_data[cpu].next = NULL;
 
 	record->locked = 0;
-	free_record(record);
+	tracecmd_free_record(record);
 }
 
 static inline unsigned long long
-timestamp_correction_calc(unsigned long long ts, struct ts_offset_sample *min,
+timestamp_correction_calc(unsigned long long ts, unsigned int flags,
+			  struct ts_offset_sample *min,
 			  struct ts_offset_sample *max)
 {
-	long long offset = ((long long)ts - min->time) *
-			   (max->offset - min->offset);
-	long long delta = max->time - min->time;
-	long long tscor = min->offset +
-			(offset + delta / 2) / delta;
+	long long scaling;
+	long long tscor;
 
+	if (flags & TRACECMD_TSYNC_FLAG_INTERPOLATE) {
+		long long delta = max->time - min->time;
+		long long offset = ((long long)ts - min->time) *
+				   (max->offset - min->offset);
+
+		scaling = (min->scaling + max->scaling) / 2;
+		tscor = min->offset + (offset + delta / 2) / delta;
+
+	} else {
+		scaling = min->scaling;
+		tscor = min->offset;
+	}
+
+	ts *= scaling;
 	if (tscor < 0)
 		return ts - llabs(tscor);
 
@@ -1140,6 +1221,9 @@ static unsigned long long timestamp_correct(unsigned long long ts,
 {
 	struct host_trace_info	*host = &handle->host;
 	int min, mid, max;
+
+	if (handle->flags & TRACECMD_FL_IGNORE_DATE)
+		return ts;
 
 	if (handle->ts_offset)
 		return ts + handle->ts_offset;
@@ -1153,16 +1237,17 @@ static unsigned long long timestamp_correct(unsigned long long ts,
 
 	/* We have two samples, nothing to search here */
 	if (host->ts_samples_count == 2)
-		return timestamp_correction_calc(ts, &host->ts_samples[0],
+		return timestamp_correction_calc(ts, host->flags,
+						 &host->ts_samples[0],
 						 &host->ts_samples[1]);
 
 	/* We have more than two samples */
 	if (ts <= host->ts_samples[0].time)
-		return timestamp_correction_calc(ts,
+		return timestamp_correction_calc(ts, host->flags,
 						 &host->ts_samples[0],
 						 &host->ts_samples[1]);
 	else if (ts >= host->ts_samples[host->ts_samples_count-1].time)
-		return timestamp_correction_calc(ts,
+		return timestamp_correction_calc(ts, host->flags,
 						 &host->ts_samples[host->ts_samples_count-2],
 						 &host->ts_samples[host->ts_samples_count-1]);
 	min = 0;
@@ -1178,7 +1263,8 @@ static unsigned long long timestamp_correct(unsigned long long ts,
 		mid = (min + max)/2;
 	}
 
-	return timestamp_correction_calc(ts, &host->ts_samples[mid],
+	return timestamp_correction_calc(ts, host->flags,
+					 &host->ts_samples[mid],
 					 &host->ts_samples[mid+1]);
 }
 
@@ -1503,7 +1589,7 @@ tracecmd_read_cpu_last(struct tracecmd_input *handle, int cpu)
 	offset = page_offset;
 
 	do {
-		free_record(record);
+		tracecmd_free_record(record);
 		record = tracecmd_read_data(handle, cpu);
 		if (record)
 			offset = record->offset;
@@ -1988,7 +2074,7 @@ tracecmd_peek_next_data(struct tracecmd_input *handle, int *rec_cpu)
  * Note, this is not that fast of an algorithm, since it needs
  * to build the timestamp for the record.
  *
- * The record returned must be freed with free_record().
+ * The record returned must be freed with tracecmd_free_record().
  */
 struct tep_record *
 tracecmd_read_prev(struct tracecmd_input *handle, struct tep_record *record)
@@ -2028,9 +2114,9 @@ tracecmd_read_prev(struct tracecmd_input *handle, struct tep_record *record)
 		if (record->offset == offset)
 			break;
 		index = record->offset - page_offset;
-		free_record(record);
+		tracecmd_free_record(record);
 	}
-	free_record(record);
+	tracecmd_free_record(record);
 
 	if (index)
 		/* we found our record */
@@ -2054,14 +2140,14 @@ tracecmd_read_prev(struct tracecmd_input *handle, struct tep_record *record)
 		do {
 			if (record) {
 				index = record->offset - page_offset;
-				free_record(record);
+				tracecmd_free_record(record);
 			}
 			record = tracecmd_read_data(handle, cpu);
 			/* Should not happen */
 			if (!record)
 				return NULL;
 		} while (record->offset != offset);
-		free_record(record);
+		tracecmd_free_record(record);
 
 		if (index)
 			/* we found our record */
@@ -2181,7 +2267,9 @@ static void tsync_offset_load(struct tracecmd_input *handle, char *buf)
 		host->ts_samples[i].time = tep_read_number(handle->pevent,
 							   buf8 + i, 8);
 		host->ts_samples[i].offset = tep_read_number(handle->pevent,
-						buf8 + host->ts_samples_count+i, 8);
+						buf8 + host->ts_samples_count + i, 8);
+		host->ts_samples[i].scaling = tep_read_number(handle->pevent,
+						buf8 + (2 * host->ts_samples_count) + i, 8);
 	}
 	qsort(host->ts_samples, host->ts_samples_count,
 	      sizeof(struct ts_offset_sample), tsync_offset_cmp);
@@ -2193,38 +2281,10 @@ static void tsync_offset_load(struct tracecmd_input *handle, char *buf)
 	host->ts_samples_count = j;
 }
 
-static void tsync_check_enable(struct tracecmd_input *handle)
-{
-	struct host_trace_info	*host = &handle->host;
-	struct guest_trace_info *guest;
-
-	host->sync_enable = false;
-
-	if (!host->peer_data || !host->peer_data->guest ||
-	    !host->ts_samples_count || !host->ts_samples)
-		return;
-	if (host->peer_trace_id != host->peer_data->trace_id)
-		return;
-	guest = host->peer_data->guest;
-	while (guest) {
-		if (guest->trace_id == handle->trace_id)
-			break;
-		guest = guest->next;
-	}
-	if (!guest)
-		return;
-
-	host->sync_enable = true;
-}
-
 static void trace_tsync_offset_free(struct host_trace_info *host)
 {
 	free(host->ts_samples);
 	host->ts_samples = NULL;
-	if (host->peer_data) {
-		tracecmd_close(host->peer_data);
-		host->peer_data = NULL;
-	}
 }
 
 static int trace_pid_map_cmp(const void *a, const void *b)
@@ -2233,7 +2293,6 @@ static int trace_pid_map_cmp(const void *a, const void *b)
 	struct tracecmd_proc_addr_map *m_b = (struct tracecmd_proc_addr_map *)b;
 
 	if (m_a->start > m_b->start)
-		return 1;
 	if (m_a->start < m_b->start)
 		return -1;
 	return 0;
@@ -2530,27 +2589,32 @@ static int handle_options(struct tracecmd_input *handle)
 		case TRACECMD_OPTION_TIME_SHIFT:
 			/*
 			 * long long int (8 bytes) trace session ID
+			 * int (4 bytes) protocol flags.
 			 * int (4 bytes) count of timestamp offsets.
 			 * long long array of size [count] of times,
 			 *      when the offsets were calculated.
 			 * long long array of size [count] of timestamp offsets.
+			 * long long array of size [count] of timestamp scaling ratios.*
 			 */
-			if (size < 12 || handle->flags & TRACECMD_FL_IGNORE_DATE)
+			if (size < 16 || handle->flags & TRACECMD_FL_IGNORE_DATE)
 				break;
 			handle->host.peer_trace_id = tep_read_number(handle->pevent,
 								     buf, 8);
+			handle->host.flags = tep_read_number(handle->pevent,
+							     buf + 8, 4);
 			handle->host.ts_samples_count = tep_read_number(handle->pevent,
-									buf + 8, 4);
+									buf + 12, 4);
 			samples_size = (8 * handle->host.ts_samples_count);
-			if (size != (12 + (2 * samples_size))) {
+			if (size != (16 + (2 * samples_size))) {
 				warning("Failed to extract Time Shift information from the file: found size %d, expected is %d",
-					size, 12 + (2 * samples_size));
+					size, 16 + (2 * samples_size));
 				break;
 			}
 			handle->host.ts_samples = malloc(2 * samples_size);
 			if (!handle->host.ts_samples)
 				return -ENOMEM;
-			tsync_offset_load(handle, buf + 12);
+			tsync_offset_load(handle, buf + 16);
+			tracecmd_enable_tsync(handle, true);
 			break;
 		case TRACECMD_OPTION_CPUSTAT:
 			buf[size-1] = '\n';
@@ -2628,6 +2692,9 @@ static int read_options_type(struct tracecmd_input *handle)
 {
 	char buf[10];
 
+	if (handle->file_state >= TRACECMD_FILE_CPU_LATENCY)
+		return 0;
+
 	if (do_read_check(handle, buf, 10))
 		return -1;
 
@@ -2635,6 +2702,7 @@ static int read_options_type(struct tracecmd_input *handle)
 	if (strncmp(buf, "options", 7) == 0) {
 		if (handle_options(handle) < 0)
 			return -1;
+		handle->file_state = TRACECMD_FILE_OPTIONS;
 		if (do_read_check(handle, buf, 10))
 			return -1;
 	}
@@ -2643,9 +2711,9 @@ static int read_options_type(struct tracecmd_input *handle)
 	 * Check if this is a latency report or flyrecord.
 	 */
 	if (strncmp(buf, "latency", 7) == 0)
-		handle->flags |= TRACECMD_FL_LATENCY;
+		handle->file_state = TRACECMD_FILE_CPU_LATENCY;
 	else if (strncmp(buf, "flyrecord", 9) == 0)
-		handle->flags |= TRACECMD_FL_FLYRECORD;
+		handle->file_state = TRACECMD_FILE_CPU_FLYRECORD;
 	else
 		return -1;
 
@@ -2666,11 +2734,11 @@ static int read_cpu_data(struct tracecmd_input *handle)
 	/*
 	 * Check if this is a latency report or not.
 	 */
-	if (handle->flags & TRACECMD_FL_LATENCY)
+	if (handle->file_state == TRACECMD_FILE_CPU_LATENCY)
 		return 1;
 
 	/* We expect this to be flyrecord */
-	if (!(handle->flags & TRACECMD_FL_FLYRECORD))
+	if (handle->file_state != TRACECMD_FILE_CPU_FLYRECORD)
 		return -1;
 
 	cpus = handle->cpus;
@@ -2789,11 +2857,17 @@ static int read_and_parse_cmdlines(struct tracecmd_input *handle)
 	unsigned long long size;
 	char *cmdlines;
 
+	if (handle->file_state >= TRACECMD_FILE_CMD_LINES)
+		return 0;
+
 	if (read_data_and_size(handle, &cmdlines, &size) < 0)
 		return -1;
 	cmdlines[size] = 0;
 	tracecmd_parse_cmdlines(pevent, cmdlines, size);
 	free(cmdlines);
+
+	handle->file_state = TRACECMD_FILE_CMD_LINES;
+
 	return 0;
 }
 
@@ -3054,6 +3128,7 @@ struct hook_list *tracecmd_hooks(struct tracecmd_input *handle)
 /**
  * tracecmd_alloc_fd - create a tracecmd_input handle from a file descriptor
  * @fd: the file descriptor for the trace.dat file
+ * @flags: bitmask of enum tracecmd_open_flags
  *
  * Allocate a tracecmd_input handle from a file descriptor and open the
  * file. This tests if the file is of trace-cmd format and allocates
@@ -3065,7 +3140,7 @@ struct hook_list *tracecmd_hooks(struct tracecmd_input *handle)
  * Unless you know what you are doing with this, you want to use
  * tracecmd_open_fd() instead.
  */
-struct tracecmd_input *tracecmd_alloc_fd(int fd)
+struct tracecmd_input *tracecmd_alloc_fd(int fd, int flags)
 {
 	struct tracecmd_input *handle;
 	char test[] = TRACECMD_MAGIC;
@@ -3106,9 +3181,11 @@ struct tracecmd_input *tracecmd_alloc_fd(int fd)
 		goto failed_read;
 
 	/* register default ftrace functions first */
-	tracecmd_ftrace_overrides(handle, &handle->finfo);
+	if (!(flags & TRACECMD_FL_LOAD_NO_PLUGINS) &&
+	    !(flags & TRACECMD_FL_LOAD_NO_SYSTEM_PLUGINS))
+		tracecmd_ftrace_overrides(handle, &handle->finfo);
 
-	handle->plugin_list = trace_load_plugins(handle->pevent);
+	handle->plugin_list = trace_load_plugins(handle->pevent, flags);
 
 	tep_set_file_bigendian(handle->pevent, buf[0]);
 	tep_set_local_bigendian(handle->pevent, tracecmd_host_bigendian());
@@ -3128,6 +3205,8 @@ struct tracecmd_input *tracecmd_alloc_fd(int fd)
 	handle->header_files_start =
 		lseek64(handle->fd, handle->header_files_start, SEEK_SET);
 
+	handle->file_state = TRACECMD_FILE_INIT;
+
 	return handle;
 
  failed_read:
@@ -3139,6 +3218,7 @@ struct tracecmd_input *tracecmd_alloc_fd(int fd)
 /**
  * tracecmd_alloc_fd - create a tracecmd_input handle from a file name
  * @file: the file name of the file that is of tracecmd data type.
+ * @flags: bitmask of enum tracecmd_open_flags
  *
  * Allocate a tracecmd_input handle from a given file name and open the
  * file. This tests if the file is of trace-cmd format and allocates
@@ -3150,7 +3230,7 @@ struct tracecmd_input *tracecmd_alloc_fd(int fd)
  * Unless you know what you are doing with this, you want to use
  * tracecmd_open() instead.
  */
-struct tracecmd_input *tracecmd_alloc(const char *file)
+struct tracecmd_input *tracecmd_alloc(const char *file, int flags)
 {
 	int fd;
 
@@ -3158,23 +3238,24 @@ struct tracecmd_input *tracecmd_alloc(const char *file)
 	if (fd < 0)
 		return NULL;
 
-	return tracecmd_alloc_fd(fd);
+	return tracecmd_alloc_fd(fd, flags);
 }
 
 /**
  * tracecmd_open_fd - create a tracecmd_handle from the trace.dat file descriptor
  * @fd: the file descriptor for the trace.dat file
+ * @flags: bitmask of enum tracecmd_open_flags
  */
-struct tracecmd_input *tracecmd_open_fd(int fd)
+struct tracecmd_input *tracecmd_open_fd(int fd, int flags)
 {
 	struct tracecmd_input *handle;
 	int ret;
 
-	handle = tracecmd_alloc_fd(fd);
+	handle = tracecmd_alloc_fd(fd, flags);
 	if (!handle)
 		return NULL;
 
-	if (tracecmd_read_headers(handle) < 0)
+	if (tracecmd_read_headers(handle, 0) < 0)
 		goto fail;
 
 	if ((ret = tracecmd_init_data(handle)) < 0)
@@ -3190,8 +3271,9 @@ fail:
 /**
  * tracecmd_open - create a tracecmd_handle from a given file
  * @file: the file name of the file that is of tracecmd data type.
+ * @flags: bitmask of enum tracecmd_open_flags
  */
-struct tracecmd_input *tracecmd_open(const char *file)
+struct tracecmd_input *tracecmd_open(const char *file, int flags)
 {
 	int fd;
 
@@ -3199,15 +3281,16 @@ struct tracecmd_input *tracecmd_open(const char *file)
 	if (fd < 0)
 		return NULL;
 
-	return tracecmd_open_fd(fd);
+	return tracecmd_open_fd(fd, flags);
 }
 
 /**
  * tracecmd_open_head - create a tracecmd_handle from a given file, read
  *			and parse only the trace headers from the file
  * @file: the file name of the file that is of tracecmd data type.
+ * @flags: bitmask of enum tracecmd_open_flags
  */
-struct tracecmd_input *tracecmd_open_head(const char *file)
+struct tracecmd_input *tracecmd_open_head(const char *file, int flags)
 {
 	struct tracecmd_input *handle;
 	int fd;
@@ -3216,11 +3299,11 @@ struct tracecmd_input *tracecmd_open_head(const char *file)
 	if (fd < 0)
 		return NULL;
 
-	handle = tracecmd_alloc_fd(fd);
+	handle = tracecmd_alloc_fd(fd, flags);
 	if (!handle)
 		return NULL;
 
-	if (tracecmd_read_headers(handle) < 0)
+	if (tracecmd_read_headers(handle, 0) < 0)
 		goto fail;
 
 	return handle;
@@ -3228,61 +3311,6 @@ struct tracecmd_input *tracecmd_open_head(const char *file)
 fail:
 	tracecmd_close(handle);
 	return NULL;
-}
-
-/**
- * tracecmd_unpair_peer - Remove the linked tracing peer of this handle
- * @handle: input handle for the trace.dat file
- *
- * When tracing host and one or more guest machines at the same time,
- * guest and host are tracing peers. There is information in both trace
- * files, related to host PID to guest vCPU mapping, timestamp synchronization
- * and other. This information is useful when opening files at the same time and
- * merging the events. When the host is set as a tracing peer to the guest, then
- * the timestamps of guest's events are recalculated to match the host event's time
- *
- * This removes any peer that is linked to the  @handle.
- */
-void tracecmd_unpair_peer(struct tracecmd_input *handle)
-{
-	if (!handle)
-		return;
-
-	if (handle->host.peer_data) {
-		tracecmd_close(handle->host.peer_data);
-		handle->host.peer_data = NULL;
-		tsync_check_enable(handle);
-	}
-}
-
-/**
- * tracecmd_pair_peer - Link a tracing peer to this handle
- * @handle: input handle for the trace.dat file
- * @peer: input handle for the tracing peer
- *
- * When tracing host and one or more guest machines at the same time,
- * guest and host are tracing peers. There is information in both trace
- * files, related to host PID to guest vCPU mapping, timestamp synchronization
- * and other. This information is useful when opening files at the same time and
- * merging the events. When the host is set as a tracing peer to the guest, then
- * the timestamps of guest's events are recalculated to match the host event's time
- *
- * Returns 1, if a peer is already paired, -1 in case of an error or 0 otherwise
- */
-int tracecmd_pair_peer(struct tracecmd_input *handle,
-		       struct tracecmd_input *peer)
-{
-	if (!handle)
-		return -1;
-
-	if (handle->host.peer_data)
-		return 1;
-
-	handle->host.peer_data = peer;
-	tracecmd_ref(peer);
-	tsync_check_enable(handle);
-
-	return 0;
 }
 
 /**
@@ -3419,7 +3447,8 @@ static int copy_header_files(struct tracecmd_input *handle, int fd)
 {
 	unsigned long long size;
 
-	lseek64(handle->fd, handle->header_files_start, SEEK_SET);
+	if (handle->file_state != TRACECMD_FILE_HEADERS - 1)
+		return -1;
 
 	/* "header_page"  */
 	if (read_copy_data(handle, 12, fd) < 0)
@@ -3441,6 +3470,8 @@ static int copy_header_files(struct tracecmd_input *handle, int fd)
 	if (read_copy_data(handle, size, fd) < 0)
 		return -1;
 
+	handle->file_state = TRACECMD_FILE_HEADERS;
+
 	return 0;
 }
 
@@ -3449,6 +3480,9 @@ static int copy_ftrace_files(struct tracecmd_input *handle, int fd)
 	unsigned long long size;
 	unsigned int count;
 	unsigned int i;
+
+	if (handle->file_state != TRACECMD_FILE_FTRACE_EVENTS - 1)
+		return -1;
 
 	if (read_copy_size4(handle, fd, &count) < 0)
 		return -1;
@@ -3462,6 +3496,8 @@ static int copy_ftrace_files(struct tracecmd_input *handle, int fd)
 			return -1;
 	}
 
+	handle->file_state = TRACECMD_FILE_FTRACE_EVENTS;
+
 	return 0;
 }
 
@@ -3472,6 +3508,9 @@ static int copy_event_files(struct tracecmd_input *handle, int fd)
 	unsigned int systems;
 	unsigned int count;
 	unsigned int i,x;
+
+	if (handle->file_state != TRACECMD_FILE_ALL_EVENTS - 1)
+		return -1;
 
 	if (read_copy_size4(handle, fd, &systems) < 0)
 		return -1;
@@ -3498,12 +3537,17 @@ static int copy_event_files(struct tracecmd_input *handle, int fd)
 		}
 	}
 
+	handle->file_state = TRACECMD_FILE_ALL_EVENTS;
+
 	return 0;
 }
 
 static int copy_proc_kallsyms(struct tracecmd_input *handle, int fd)
 {
 	unsigned int size;
+
+	if (handle->file_state != TRACECMD_FILE_KALLSYMS - 1)
+		return -1;
 
 	if (read_copy_size4(handle, fd, &size) < 0)
 		return -1;
@@ -3512,6 +3556,8 @@ static int copy_proc_kallsyms(struct tracecmd_input *handle, int fd)
 
 	if (read_copy_data(handle, size, fd) < 0)
 		return -1;
+
+	handle->file_state = TRACECMD_FILE_KALLSYMS;
 
 	return 0;
 }
@@ -3520,6 +3566,9 @@ static int copy_ftrace_printk(struct tracecmd_input *handle, int fd)
 {
 	unsigned int size;
 
+	if (handle->file_state != TRACECMD_FILE_PRINTK - 1)
+		return -1;
+
 	if (read_copy_size4(handle, fd, &size) < 0)
 		return -1;
 	if (!size)
@@ -3528,12 +3577,17 @@ static int copy_ftrace_printk(struct tracecmd_input *handle, int fd)
 	if (read_copy_data(handle, size, fd) < 0)
 		return -1;
 
+	handle->file_state = TRACECMD_FILE_PRINTK;
+
 	return 0;
 }
 
 static int copy_command_lines(struct tracecmd_input *handle, int fd)
 {
 	unsigned long long size;
+
+	if (handle->file_state != TRACECMD_FILE_CMD_LINES - 1)
+		return -1;
 
 	if (read_copy_size8(handle, fd, &size) < 0)
 		return -1;
@@ -3543,38 +3597,109 @@ static int copy_command_lines(struct tracecmd_input *handle, int fd)
 	if (read_copy_data(handle, size, fd) < 0)
 		return -1;
 
+	handle->file_state = TRACECMD_FILE_CMD_LINES;
+
 	return 0;
 }
 
-int tracecmd_copy_headers(struct tracecmd_input *handle, int fd)
+/**
+ * tracecmd_copy_headers - Copy headers from a tracecmd_input handle to a file descriptor
+ * @handle: input handle for the trace.dat file to copy from.
+ * @fd: The file descriptor to copy to.
+ * @start_state: The file state to start copying from (zero for the beginnig)
+ * @end_state: The file state to stop at (zero for up to cmdlines)
+ *
+ * This is used to copy trace header data of a trace.dat file to a
+ * file descriptor. Using @start_state and @end_state it may be used
+ * multiple times against the input handle.
+ *
+ * NOTE: The input handle is also modified, and ends at the end
+ *       state as well.
+ */
+int tracecmd_copy_headers(struct tracecmd_input *handle, int fd,
+			  enum tracecmd_file_states start_state,
+			  enum tracecmd_file_states end_state)
 {
 	int ret;
 
-	ret = copy_header_files(handle, fd);
-	if (ret < 0)
+	if (!start_state)
+		start_state = TRACECMD_FILE_HEADERS;
+	if (!end_state)
+		end_state = TRACECMD_FILE_CMD_LINES;
+
+	if (start_state > end_state)
 		return -1;
 
-	ret = copy_ftrace_files(handle, fd);
-	if (ret < 0)
-		return -1;
+	if (end_state < TRACECMD_FILE_HEADERS)
+		return 0;
 
-	ret = copy_event_files(handle, fd);
-	if (ret < 0)
-		return -1;
+	if (handle->file_state >= start_state) {
+		/* Set the handle to just before the start state */
+		lseek64(handle->fd, handle->header_files_start, SEEK_SET);
+		/* Now that the file handle has moved, change its state */
+		handle->file_state = TRACECMD_FILE_INIT;
+	}
 
-	ret = copy_proc_kallsyms(handle, fd);
+	/* Try to bring the input up to the start state - 1 */
+	ret = tracecmd_read_headers(handle, start_state - 1);
 	if (ret < 0)
-		return -1;
+		goto out;
 
-	ret = copy_ftrace_printk(handle, fd);
-	if (ret < 0)
-		return -1;
+	switch (start_state) {
+	case TRACECMD_FILE_HEADERS:
+		ret = copy_header_files(handle, fd);
+		if (ret < 0)
+			goto out;
 
-	ret = copy_command_lines(handle, fd);
-	if (ret < 0)
-		return -1;
+		/* fallthrough */
+	case TRACECMD_FILE_FTRACE_EVENTS:
+		/* handle's state is now updating with the copies */
+		if (end_state <= handle->file_state)
+			return 0;
 
-	return 0;
+		ret = copy_ftrace_files(handle, fd);
+		if (ret < 0)
+			goto out;
+
+		/* fallthrough */
+	case TRACECMD_FILE_ALL_EVENTS:
+		if (end_state <= handle->file_state)
+			return 0;
+
+		ret = copy_event_files(handle, fd);
+		if (ret < 0)
+			goto out;
+
+		/* fallthrough */
+	case TRACECMD_FILE_KALLSYMS:
+		if (end_state <= handle->file_state)
+			return 0;
+
+		ret = copy_proc_kallsyms(handle, fd);
+		if (ret < 0)
+			goto out;
+
+		/* fallthrough */
+	case TRACECMD_FILE_PRINTK:
+		if (end_state <= handle->file_state)
+			return 0;
+
+		ret = copy_ftrace_printk(handle, fd);
+		if (ret < 0)
+			goto out;
+
+		/* fallthrough */
+	case TRACECMD_FILE_CMD_LINES:
+		if (end_state <= handle->file_state)
+			return 0;
+
+		ret = copy_command_lines(handle, fd);
+	default:
+		break;
+	}
+
+ out:
+	return ret < 0 ? -1 : 0;
 }
 
 /**
@@ -3722,6 +3847,11 @@ tracecmd_buffer_instance_handle(struct tracecmd_input *handle, int indx)
 		goto error;
 	}
 
+	/*
+	 * read_options_type() is called right after the CPU count so update
+	 * file state accordingly.
+	 */
+	new_handle->file_state = TRACECMD_FILE_CPU_COUNT;
 	ret = read_options_type(new_handle);
 	if (!ret)
 		ret = read_cpu_data(new_handle);
@@ -3776,10 +3906,10 @@ int tracecmd_cpus(struct tracecmd_input *handle)
 }
 
 /**
- * tracecmd_get_pevent - return the pevent handle
+ * tracecmd_get_tep - return the tep handle
  * @handle: input handle for the trace.dat file
  */
-struct tep_handle *tracecmd_get_pevent(struct tracecmd_input *handle)
+struct tep_handle *tracecmd_get_tep(struct tracecmd_input *handle)
 {
 	return handle->pevent;
 }
@@ -3860,19 +3990,6 @@ int tracecmd_get_guest_cpumap(struct tracecmd_input *handle,
 	if (cpu_pid)
 		*cpu_pid = guest->cpu_pid;
 	return 0;
-}
-
-/**
- * tracecmd_get_tsync_peer - get the trace session id of the peer host
- * @handle: input handle for the trace.dat file
- *
- * Returns the trace id of the peer host, written in the trace file
- *
- * This information is stored in guest trace.dat file
- */
-unsigned long long tracecmd_get_tsync_peer(struct tracecmd_input *handle)
-{
-	return handle->host.peer_trace_id;
 }
 
 /**

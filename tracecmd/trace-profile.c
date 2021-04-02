@@ -21,7 +21,7 @@
 
 #ifdef WARN_NO_AUDIT
 # warning "lib audit not found, using raw syscalls "	\
-	"(install libaudit-devel and try again)"
+	"(install libaudit-devel(for fedora) or libaudit-dev(for debian/ubuntu) and try again)"
 #endif
 
 #define TASK_STATE_TO_CHAR_STR "RSDTtXZxKWP"
@@ -393,7 +393,7 @@ static void free_start(struct start_data *start)
 	if (start->task->last_start == start)
 		start->task->last_start = NULL;
 	if (start->stack.record)
-		free_record(start->stack.record);
+		tracecmd_free_record(start->stack.record);
 	trace_hash_del(&start->hash);
 	list_del(&start->list);
 	free(start);
@@ -442,7 +442,7 @@ add_and_free_start(struct task_data *task, struct start_data *start,
 
 		add_event_stack(event_hash, caller, size, delta,
 				start->stack.record->ts);
-		free_record(start->stack.record);
+		tracecmd_free_record(start->stack.record);
 		start->stack.record = NULL;
 	}
 
@@ -786,7 +786,7 @@ static void trace_profile_record(struct tracecmd_input *handle,
 
 	/* If the last stack hasn't changed, free it */
 	if (stack_record && task->last_stack == stack_record) {
-		free_record(stack_record);
+		tracecmd_free_record(stack_record);
 		task->last_stack = NULL;
 	}
 }
@@ -1069,7 +1069,7 @@ static int handle_stacktrace_event(struct handle_data *h,
 		return -1;
 
 	if (task->last_stack) {
-		free_record(task->last_stack);
+		tracecmd_free_record(task->last_stack);
 		task->last_stack = NULL;
 	}
 
@@ -1267,7 +1267,7 @@ static int handle_sched_wakeup_event(struct handle_data *h,
 void trace_init_profile(struct tracecmd_input *handle, struct hook_list *hook,
 			int global)
 {
-	struct tep_handle *pevent = tracecmd_get_pevent(handle);
+	struct tep_handle *pevent = tracecmd_get_tep(handle);
 	struct tep_format_field **fields;
 	struct handle_data *h;
 	struct event_data *event_data;
@@ -2138,7 +2138,7 @@ static void __free_task(struct task_data *task)
 		trace_hash_while_item(item, bucket) {
 			start = start_from_item(item);
 			if (start->stack.record)
-				free_record(start->stack.record);
+				tracecmd_free_record(start->stack.record);
 			list_del(&start->list);
 			trace_hash_del(item);
 			free(start);
@@ -2156,7 +2156,7 @@ static void __free_task(struct task_data *task)
 	trace_hash_free(&task->event_hash);
 
 	if (task->last_stack)
-		free_record(task->last_stack);
+		tracecmd_free_record(task->last_stack);
 }
 
 static void free_task(struct task_data *task)

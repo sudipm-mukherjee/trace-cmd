@@ -53,13 +53,13 @@ trace_stream_init(struct buffer_instance *instance, int cpu, int fd, int cpus,
 
 	lseek(ofd, 0, SEEK_SET);
 
-	trace_input = tracecmd_alloc_fd(ofd);
+	trace_input = tracecmd_alloc_fd(ofd, 0);
 	if (!trace_input) {
 		close(ofd);
 		goto fail;
 	}
 
-	if (tracecmd_read_headers(trace_input) < 0)
+	if (tracecmd_read_headers(trace_input, 0) < 0)
 		goto fail_free_input;
 
 	if (handle_init)
@@ -115,7 +115,7 @@ int trace_stream_read(struct pid_record_data *pids, int nr_pids, struct timeval 
 	}
 	if (last_pid) {
 		trace_show_data(last_pid->instance->handle, last_pid->record);
-		free_record(last_pid->record);
+		tracecmd_free_record(last_pid->record);
 		last_pid->record = NULL;
 		return 1;
 	}

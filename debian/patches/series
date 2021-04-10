@@ -1,2 +1,4 @@
 add_lib.patch
 plugin_path.patch
+find_trace-cmd.patch
+0001-Revert-trace-cmd-Add-rpath-libdir-for-trace-cmd-to-f.patch

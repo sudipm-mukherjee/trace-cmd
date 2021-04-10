@@ -5,14 +5,16 @@ Forwarded: no
 
 ---
 
---- trace-cmd-2.9.1.orig/utest/Makefile
-+++ trace-cmd-2.9.1/utest/Makefile
-@@ -11,7 +11,7 @@ OBJS += tracefs-utest.o
+diff --git a/utest/Makefile b/utest/Makefile
+index 2cf9974..daca400 100644
+--- a/utest/Makefile
++++ b/utest/Makefile
+@@ -10,7 +10,7 @@ OBJS =
+ OBJS += trace-utest.o
+ OBJS += tracefs-utest.o
  
- LIBS += -lcunit				\
- 	-L$(LIBTRACEFS_DIR) -ltracefs	\
--	-L$(LIBTRACEEVENT_DIR) -ltraceevent
-+	-L$(LIBTRACEEVENT_DIR) -ltraceevent -ldl
+-LIBS += -lcunit $(LIBTRACEEVENT_LDLAGS) $(LIBTRACEFS_LDLAGS)
++LIBS += -lcunit $(LIBTRACEEVENT_LDLAGS) $(LIBTRACEFS_LDLAGS) -ldl -ltracefs -ltraceevent
  
  OBJS := $(OBJS:%.o=$(bdir)/%.o)
  DEPS := $(OBJS:$(bdir)/%.o=$(bdir)/.%.d)

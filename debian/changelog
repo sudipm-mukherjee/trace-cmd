@@ -1,3 +1,9 @@
+trace-cmd (2.9.3-1) experimental; urgency=medium
+
+  * Update to upstream v2.9.3
+
+ -- Sudip Mukherjee <sudipm.mukherjee@gmail.com>  Sun, 23 May 2021 15:37:09 +0100
+
 trace-cmd (2.9.2-1) experimental; urgency=medium
 
   * Update to upstream v2.9.2

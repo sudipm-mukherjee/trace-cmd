@@ -6,19 +6,20 @@ export DEB_DESTDIR ?= $(CURDIR)/debian/tmp/
 %:
 	dh $@
 
-OPTS=DESTDIR=$(DEB_DESTDIR) prefix=/usr VERBOSE=$(if $(filter terse,$(DEB_BUILD_OPTIONS)),0,1) libdir_relative=lib
+OPTS=DESTDIR=$(DEB_DESTDIR) prefix=/usr VERBOSE=$(if $(filter terse,$(DEB_BUILD_OPTIONS)),0,1) libdir_relative=lib/$(DEB_HOST_MULTIARCH) pkgconfig_dir=/usr/lib/$(DEB_HOST_MULTIARCH)/pkgconfig
 
 override_dh_auto_clean:
 	$(MAKE) clean doc_clean $(OPTS)
 override_dh_auto_build:
 	dh_auto_build -- all $(OPTS)
 	# Run cmake in the way the Makefile would do it, but append our flags.
-	dh_auto_configure --sourcedirectory=kernel-shark --builddirectory=kernel-shark/build -- -D_INSTALL_PREFIX=/usr
+	dh_auto_configure --sourcedirectory=kernel-shark --builddirectory=kernel-shark/build -- -D_INSTALL_PREFIX=/usr -D_LIBDIR=/usr/lib/$(DEB_HOST_MULTIARCH)
 	$(MAKE) gui $(OPTS)
 	$(MAKE) doc $(OPTS)
 	$(MAKE) doc_gui $(OPTS)
 override_dh_auto_install:
 	$(MAKE) install $(OPTS)
+	$(MAKE) install_libs $(OPTS)
 	$(MAKE) install_gui $(OPTS)
 	$(MAKE) install_doc $(OPTS)
 	$(MAKE) install_doc_gui $(OPTS)

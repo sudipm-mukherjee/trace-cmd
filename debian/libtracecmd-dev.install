@@ -1,0 +1,3 @@
+usr/include/trace-cmd
+usr/lib/*/libtracecmd.so
+usr/lib/*/pkgconfig

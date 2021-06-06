@@ -1,3 +1,11 @@
+trace-cmd (2.9.3-2) experimental; urgency=medium
+
+  * Build binary package for libtracecmd.
+  * Fix path for libraries and documentation.
+  * Update copyright.
+
+ -- Sudip Mukherjee <sudipm.mukherjee@gmail.com>  Sun, 06 Jun 2021 23:03:31 +0100
+
 trace-cmd (2.9.3-1) experimental; urgency=medium
 
   * Update to upstream v2.9.3

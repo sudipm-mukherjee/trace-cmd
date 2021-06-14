@@ -21,7 +21,7 @@
 #include <sys/sysinfo.h>
 #include <time.h>
 
-#include "trace-cmd-private.h"
+#include "trace-cmd-local.h"
 #include "event-utils.h"
 
 #define LOCAL_PLUGIN_DIR ".trace-cmd/plugins"
@@ -597,4 +597,11 @@ unsigned long long tracecmd_generate_traceid(void)
 
 	free(str);
 	return hash;
+}
+
+bool tracecmd_is_version_supported(unsigned int version)
+{
+	if (version <= FILE_VERSION)
+		return true;
+	return false;
 }

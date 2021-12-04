@@ -1,3 +1,11 @@
+trace-cmd (2.9.3-4) unstable; urgency=medium
+
+  * Remove kernelshark
+  * Update Standards-Version to 4.6.0.1
+  * Add missing libraries. (Closes: #999641)
+
+ -- Sudip Mukherjee <sudipm.mukherjee@gmail.com>  Sat, 04 Dec 2021 19:54:06 +0000
+
 trace-cmd (2.9.3-3) unstable; urgency=medium
 
   * Upload to unstable.

@@ -1,3 +1,12 @@
+trace-cmd (2.9.6-1) unstable; urgency=medium
+
+  * Update to upstream v2.9.6
+  * Build using packaged libtraceevent and libtracefs.
+  * Remove remaining dependencies of kernelshark.
+  * Add autopkgtest.
+
+ -- Sudip Mukherjee <sudipm.mukherjee@gmail.com>  Tue, 21 Dec 2021 21:40:45 +0000
+
 trace-cmd (2.9.3-4) unstable; urgency=medium
 
   * Remove kernelshark

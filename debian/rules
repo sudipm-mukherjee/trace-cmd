@@ -12,8 +12,6 @@ override_dh_auto_clean:
 	$(MAKE) clean doc_clean $(OPTS)
 override_dh_auto_build:
 	dh_auto_build -- all $(OPTS)
-	# Run cmake in the way the Makefile would do it, but append our flags.
-	dh_auto_configure --sourcedirectory=kernel-shark --builddirectory=kernel-shark/build -- -D_INSTALL_PREFIX=/usr -D_LIBDIR=/usr/lib/$(DEB_HOST_MULTIARCH)
 	$(MAKE) doc $(OPTS)
 override_dh_auto_install:
 	$(MAKE) install $(OPTS)

@@ -1,9 +1,8 @@
 Source: trace-cmd
 Section: devel
 Priority: optional
-Homepage: http://kernelshark.org/
 Maintainer: Sudip Mukherjee <sudipm.mukherjee@gmail.com>
-Build-Depends: debhelper-compat (= 13), cmake, libjson-c-dev, freeglut3-dev, libxmu-dev, libegl-dev [mipsel], libxi-dev, qtbase5-dev, asciidoc, docbook-xsl, xsltproc, policykit-1, libcunit1-dev, xmlto, pkg-config
+Build-Depends: debhelper-compat (= 13), asciidoc, docbook-xsl, xsltproc, libcunit1-dev, xmlto, pkg-config
 Standards-Version: 4.6.0.1
 Rules-Requires-Root: no
 Vcs-Browser: https://github.com/sudipm-mukherjee/trace-cmd.git

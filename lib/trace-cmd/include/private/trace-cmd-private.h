@@ -8,7 +8,7 @@
 
 #include <fcntl.h> /* for iovec */
 #include <sys/types.h>
-#include "traceevent/event-parse.h"
+#include "event-parse.h"
 #include "trace-cmd/trace-cmd.h"
 
 #define TRACECMD_MAGIC { 23, 8, 68 }
@@ -39,6 +39,8 @@ void tracecmd_record_ref(struct tep_record *record);
 
 void tracecmd_set_debug(bool set_debug);
 bool tracecmd_get_debug(void);
+
+bool tracecmd_is_version_supported(unsigned int version);
 
 struct tracecmd_output;
 struct tracecmd_recorder;

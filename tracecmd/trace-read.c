@@ -26,6 +26,14 @@
 #include "kbuffer.h"
 #include "list.h"
 
+/*
+ * tep_func_repeat_format is defined as a weak variable in the
+ * libtraceevent library function plugin, to allow applications
+ * to override the format of the timestamp it prints for the
+ * last function that repeated.
+ */
+const char *tep_func_repeat_format;
+
 static struct filter_str {
 	struct filter_str	*next;
 	char			*filter;
@@ -134,12 +142,15 @@ static struct trace_hash wakeup_hash;
 static void print_event_name(struct trace_seq *s, struct tep_event *event)
 {
 	static const char *spaces = "                    "; /* 20 spaces */
+	const char *name;
 	int len;
 
-	trace_seq_printf(s, " %s: ", event->name);
+	name = event ? event->name : "(NULL)";
+
+	trace_seq_printf(s, " %s: ", name);
 
 	/* Space out the event names evenly. */
-	len = strlen(event->name);
+	len = strlen(name);
 	if (len < 20)
 		trace_seq_printf(s, "%.*s", 20 - len, spaces);
 }
@@ -940,18 +951,20 @@ void trace_show_data(struct tracecmd_input *handle, struct tep_record *record)
 	printf("\n");
 }
 
-static void read_rest(void)
+static void read_latency(struct tracecmd_input *handle)
 {
-	char buf[BUFSIZ + 1];
+	char *buf = NULL;
+	size_t size = 0;
 	int r;
 
 	do {
-		r = read(input_fd, buf, BUFSIZ);
-		if (r > 0) {
-			buf[r] = 0;
-			printf("%s", buf);
-		}
+		r = tracecmd_latency_data_read(handle, &buf, &size);
+		if (r > 0)
+			printf("%.*s", r, buf);
 	} while (r > 0);
+
+	printf("\n");
+	free(buf);
 }
 
 static int
@@ -1165,7 +1178,7 @@ static void print_handle_file(struct handle_list *handles)
 	/* Only print file names if more than one file is read */
 	if (!multi_inputs && !instances)
 		return;
-	if (handles->file)
+	if (handles->file && *handles->file != '\0')
 		printf("%*s: ", max_file_size, handles->file);
 	else
 		printf("%*s  ", max_file_size, "");
@@ -1192,19 +1205,26 @@ enum output_type {
 };
 
 static void read_data_info(struct list_head *handle_list, enum output_type otype,
-			   int global)
+			   int global, int align_ts)
 {
+	unsigned long long ts, first_ts;
 	struct handle_list *handles;
 	struct handle_list *last_handle;
 	struct tep_record *record;
 	struct tep_record *last_record;
 	struct tep_handle *pevent;
 	struct tep_event *event;
+	int first = 1;
 	int ret;
 
 	list_for_each_entry(handles, handle_list, list) {
 		int cpus;
 
+		if (!tracecmd_is_buffer_instance(handles->handle)) {
+			ret = tracecmd_init_data(handles->handle);
+			if (ret < 0)
+				die("failed to init data");
+		}
 		cpus = tracecmd_cpus(handles->handle);
 		handles->cpus = cpus;
 		handles->last_timestamp = calloc(cpus, sizeof(*handles->last_timestamp));
@@ -1215,10 +1235,12 @@ static void read_data_info(struct list_head *handle_list, enum output_type otype
 		if (tracecmd_is_buffer_instance(handles->handle))
 			continue;
 
-		ret = tracecmd_init_data(handles->handle);
-		if (ret < 0)
-			die("failed to init data");
-
+		if (align_ts) {
+			ts = tracecmd_get_first_ts(handles->handle);
+			if (first || first_ts > ts)
+				first_ts = ts;
+			first = 0;
+		}
 		print_handle_file(handles);
 		printf("cpus=%d\n", cpus);
 
@@ -1226,7 +1248,7 @@ static void read_data_info(struct list_head *handle_list, enum output_type otype
 		if (ret > 0) {
 			if (multi_inputs)
 				die("latency traces do not work with multiple inputs");
-			read_rest();
+			read_latency(handles->handle);
 			return;
 		}
 
@@ -1275,7 +1297,7 @@ static void read_data_info(struct list_head *handle_list, enum output_type otype
 					die("error in reading buffer instance");
 				new_handle = tracecmd_buffer_instance_handle(handles->handle, i);
 				if (!new_handle) {
-					warning("could not retreive handle %s", name);
+					warning("could not retrieve handle %s", name);
 					continue;
 				}
 				add_handle(new_handle, name);
@@ -1285,6 +1307,12 @@ static void read_data_info(struct list_head *handle_list, enum output_type otype
 
 	if (otype != OUTPUT_NORMAL)
 		return;
+
+	if (align_ts) {
+		list_for_each_entry(handles, handle_list, list) {
+			tracecmd_add_ts_offset(handles->handle, -first_ts);
+		}
+	}
 
 	do {
 		last_handle = NULL;
@@ -1303,7 +1331,7 @@ static void read_data_info(struct list_head *handle_list, enum output_type otype
 		if (last_record) {
 			int cpu = last_record->cpu;
 			if (cpu >= last_handle->cpus)
-				die("cpu %d creater than %d\n", cpu, last_handle->cpus);
+				die("cpu %d greater than %d\n", cpu, last_handle->cpus);
 			if (tscheck &&
 			    last_handle->last_timestamp[cpu] > last_record->ts) {
 				errno = 0;
@@ -1342,7 +1370,14 @@ struct tracecmd_input *read_trace_header(const char *file, int flags)
 
 static void sig_end(int sig)
 {
+	struct handle_list *handles;
+
 	fprintf(stderr, "trace-cmd: Received SIGINT\n");
+
+	list_for_each_entry(handles, &handle_list, list) {
+		tracecmd_close(handles->handle);
+	}
+
 	exit(0);
 }
 
@@ -1413,12 +1448,13 @@ static void add_functions(struct tep_handle *pevent, const char *file)
 	if (ret < 0)
 		die("Can't stat file %s", file);
 
-	buf = malloc(st.st_size);
+	buf = malloc(st.st_size + 1);
 	if (!buf)
 		die("Failed to allocate for function buffer");
 	read_file_fd(fd, buf, st.st_size);
+	buf[st.st_size] = '\0';
 	close(fd);
-	tracecmd_parse_proc_kallsyms(pevent, buf, st.st_size);
+	tep_parse_kallsyms(pevent, buf);
 	free(buf);
 }
 
@@ -1484,6 +1520,9 @@ static void add_hook(const char *arg)
 }
 
 enum {
+	OPT_verbose	= 234,
+	OPT_align_ts	= 235,
+	OPT_raw_ts	= 236,
 	OPT_version	= 237,
 	OPT_tscheck	= 238,
 	OPT_tsdiff	= 239,
@@ -1503,6 +1542,7 @@ enum {
 	OPT_kallsyms	= 253,
 	OPT_events	= 254,
 	OPT_cpu		= 255,
+	OPT_cpus	= 256,
 };
 
 void trace_report (int argc, char **argv)
@@ -1530,9 +1570,12 @@ void trace_report (int argc, char **argv)
 	int show_uname = 0;
 	int show_version = 0;
 	int show_events = 0;
+	int show_cpus = 0;
 	int print_events = 0;
 	int nanosec = 0;
 	int no_date = 0;
+	int raw_ts = 0;
+	int align_ts = 0;
 	int global = 0;
 	int neg = 0;
 	int ret = 0;
@@ -1554,6 +1597,7 @@ void trace_report (int argc, char **argv)
 		int option_index = 0;
 		static struct option long_options[] = {
 			{"cpu", required_argument, NULL, OPT_cpu},
+			{"cpus", no_argument, NULL, OPT_cpus},
 			{"events", no_argument, NULL, OPT_events},
 			{"event", required_argument, NULL, OPT_event},
 			{"filter-test", no_argument, NULL, 'T'},
@@ -1574,11 +1618,14 @@ void trace_report (int argc, char **argv)
 			{"ts2secs", required_argument, NULL, OPT_ts2secs},
 			{"ts-diff", no_argument, NULL, OPT_tsdiff},
 			{"ts-check", no_argument, NULL, OPT_tscheck},
+			{"raw-ts", no_argument, NULL, OPT_raw_ts},
+			{"align-ts", no_argument, NULL, OPT_align_ts},
+			{"verbose", optional_argument, NULL, OPT_verbose},
 			{"help", no_argument, NULL, '?'},
 			{NULL, 0, NULL, 0}
 		};
 
-		c = getopt_long (argc-1, argv+1, "+hSIi:H:feGpRr:tPNn:LlEwF:VvTqO:",
+		c = getopt_long (argc-1, argv+1, "+hSIi:H:feGpRr:tPNn:LlEwF:V::vTqO:",
 			long_options, &option_index);
 		if (c == -1)
 			break;
@@ -1673,14 +1720,15 @@ void trace_report (int argc, char **argv)
 				die("Only 1 -v can be used");
 			neg = 1;
 			break;
-		case 'V':
-			show_status = 1;
-			break;
 		case 'q':
 			silence_warnings = 1;
+			tracecmd_set_loglevel(TEP_LOG_NONE);
 			break;
 		case OPT_cpu:
 			parse_cpulist(optarg);
+			break;
+		case OPT_cpus:
+			show_cpus = 1;
 			break;
 		case OPT_events:
 			print_events = 1;
@@ -1746,6 +1794,18 @@ void trace_report (int argc, char **argv)
 		case OPT_tscheck:
 			tscheck = 1;
 			break;
+		case OPT_raw_ts:
+			raw_ts = 1;
+			break;
+		case OPT_align_ts:
+			align_ts = 1;
+			break;
+		case 'V':
+		case OPT_verbose:
+			show_status = 1;
+			if (trace_set_verbose(optarg) < 0)
+				die("invalid verbose level %s", optarg);
+			break;
 		default:
 			usage(argv);
 		}
@@ -1777,7 +1837,8 @@ void trace_report (int argc, char **argv)
 
 		if (no_date)
 			tracecmd_set_flag(handle, TRACECMD_FL_IGNORE_DATE);
-
+		if (raw_ts)
+			tracecmd_set_flag(handle, TRACECMD_FL_RAW_TS);
 		page_size = tracecmd_page_size(handle);
 
 		if (show_page_size) {
@@ -1861,11 +1922,45 @@ void trace_report (int argc, char **argv)
 			return;
 		}
 
+		if (show_cpus) {
+			int cpus;
+			int ret;
+			int i;
+
+			if (!tracecmd_is_buffer_instance(handle)) {
+				ret = tracecmd_init_data(handle);
+				if (ret < 0)
+					die("failed to init data");
+			}
+			cpus = tracecmd_cpus(handle);
+			printf("List of CPUs in %s with data:\n", inputs->file);
+			for (i = 0; i < cpus; i++) {
+				if (tracecmd_read_cpu_first(handle, i))
+					printf("  %d\n", i);
+			}
+			continue;
+		}
+
 		set_event_flags(pevent, nohandler_events, TEP_EVENT_FL_NOHANDLE);
 		set_event_flags(pevent, raw_events, TEP_EVENT_FL_PRINTRAW);
 	}
 
+	if (show_cpus)
+		return;
+
 	otype = OUTPUT_NORMAL;
+
+	if (tracecmd_get_flags(handle) & TRACECMD_FL_RAW_TS) {
+		tep_func_repeat_format = "%d";
+	} else if (tracecmd_get_flags(handle) & TRACECMD_FL_IN_USECS) {
+		if (tep_test_flag(tracecmd_get_tep(handle), TEP_NSEC_OUTPUT))
+			tep_func_repeat_format = "%9.1d";
+		else
+			tep_func_repeat_format = "%6.1000d";
+	} else {
+		tep_func_repeat_format = "%12d";
+	}
+
 
 	if (show_stat)
 		otype = OUTPUT_STAT_ONLY;
@@ -1875,7 +1970,7 @@ void trace_report (int argc, char **argv)
 	/* and version overrides uname! */
 	if (show_version)
 		otype = OUTPUT_VERSION_ONLY;
-	read_data_info(&handle_list, otype, global);
+	read_data_info(&handle_list, otype, global, align_ts);
 
 	list_for_each_entry(handles, &handle_list, list) {
 		tracecmd_close(handles->handle);

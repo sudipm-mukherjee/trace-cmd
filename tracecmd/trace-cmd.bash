@@ -9,6 +9,17 @@ show_instances()
    return 0
 }
 
+show_virt()
+{
+    local cur="$1"
+    if ! which virsh &>/dev/null; then
+	return 1
+    fi
+    local virt=`virsh list | awk '/^ *[0-9]/ { print $2 }'`
+    COMPREPLY=( $(compgen -W "${virt}" -- "${cur}") )
+    return 0
+}
+
 show_options()
 {
    local cur="$1"
@@ -41,7 +52,7 @@ cmd_options()
 				 sed -e 's/ *\(-[^ ]*\).*/\1/')
     COMPREPLY=( $(compgen -W "${cmds}" -- "${cur}") )
     if [ ${#COMPREPLY[@]} -eq 0 ]; then
-	__show_files "$cur"
+	__show_files "${cur}"
     fi
 }
 
@@ -51,6 +62,13 @@ plugin_options()
 
     local opts=$(trace-cmd list -O | sed -ne 's/option://p')
     COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+}
+
+compression_param()
+{
+    local opts=$(trace-cmd list -c | grep -v 'Supported' | cut -d "," -f1)
+    opts+=" any none "
+    COMPREPLY=( $(compgen -W "${opts}") )
 }
 
 __trace_cmd_list_complete()
@@ -131,10 +149,16 @@ __trace_cmd_record_complete()
 
     case "$prev" in
         -e)
-            local events=$(trace-cmd list -e)
+	    local list=$(trace-cmd list -e "$cur")
             local prefix=${cur%%:*}
+	    if [ -z "$cur" -o  "$cur" != "$prefix" ]; then
+		COMPREPLY=( $(compgen -W "all ${list}" -- "${cur}") )
+	    else
+		local events=$(for e in $list; do echo ${e/*:/}; done | sort -u)
+	        local systems=$(for s in $list; do echo ${s/:*/:}; done | sort -u)
 
-            COMPREPLY=( $(compgen -W "${events}" -- "${cur}") )
+		COMPREPLY=( $(compgen -W "all ${events} ${systems}" -- "${cur}") )
+	    fi
 
             # This is still to handle the "*:*" special case
             if [[ -n "$prefix" ]]; then
@@ -158,6 +182,14 @@ __trace_cmd_record_complete()
 	    ;;
 	-O)
 	    show_options "$cur"
+	    ;;
+	-A)
+	    if ! show_virt "$cur"; then
+		cmd_options record "$cur"
+	    fi
+	    ;;
+	--compression)
+	    compression_param
 	    ;;
         *)
 	    # stream start and profile do not show all options
@@ -200,10 +232,34 @@ __trace_cmd_dump_complete()
     esac
 }
 
+__trace_cmd_convert_complete()
+{
+    local prev=$1
+    local cur=$2
+    shift 2
+    local words=("$@")
+
+    case "$prev" in
+	-i)
+	    __show_files
+	    ;;
+	-o)
+	    __show_files
+	    ;;
+	--compression)
+	    compression_param
+	    ;;
+	*)
+	    cmd_options convert "$cur"
+	    ;;
+    esac
+}
+
 __show_command_options()
 {
     local command="$1"
-    local cur="$2"
+    local prev="$2"
+    local cur="$3"
     local cmds=( $(trace-cmd --help 2>/dev/null | \
 		    grep " - " | sed 's/^ *//; s/ -.*//') )
 
@@ -211,11 +267,21 @@ __show_command_options()
 	if [ $cmd == "$command" ]; then
 	    local opts=$(trace-cmd $cmd -h 2>/dev/null|grep "^ *-" | \
 				 sed -e 's/ *\(-[^ ]*\).*/\1/')
-	    COMPREPLY=( $(compgen -W "${opts}" -- "$cur") )
-	    return 0
+	    if [ "$prev" == "-B" ]; then
+		for opt in ${opts[@]}; do
+		    if [ "$opt" == "-B" ]; then
+			show_instances "$cur"
+			return 0
+		    fi
+		done
+	    fi
+	    COMPREPLY=( $(compgen -W "${opts}" -- "$cur"))
+	    break
 	fi
     done
-    __show_files "$cur"
+    if [ ${#COMPREPLY[@]} -eq 0 ]; then
+	__show_files "${cur}"
+    fi
 }
 
 _trace_cmd_complete()
@@ -267,8 +333,12 @@ _trace_cmd_complete()
 	    __trace_cmd_dump_complete "${prev}" "${cur}" ${words[@]}
 	    return 0
 	    ;;
+	convert)
+	    __trace_cmd_convert_complete "${prev}" "${cur}" ${words[@]}
+	    return 0
+	    ;;
         *)
-	    __show_command_options "$w" "${cur}"
+	    __show_command_options "$w" "${prev}" "${cur}"
             ;;
     esac
 }

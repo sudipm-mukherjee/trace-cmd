@@ -11,6 +11,9 @@
 #include "event-parse.h"
 #include "trace-cmd/trace-cmd.h"
 
+#define __packed __attribute__((packed))
+#define __hidden __attribute__((visibility ("hidden")))
+
 #define TRACECMD_MAGIC { 23, 8, 68 }
 
 #define ARRAY_SIZE(_a) (sizeof(_a) / sizeof((_a)[0]))
@@ -22,12 +25,17 @@
 #define TRACECMD_ERROR(ret)	((void *)((unsigned long)(ret) | TRACECMD_ERR_MSK))
 #define TRACECMD_PTR2ERR(ptr)	((unisgned long)(ptr) & ~TRACECMD_ERR_MSK)
 
-void tracecmd_parse_cmdlines(struct tep_handle *pevent, char *file, int size);
-void tracecmd_parse_proc_kallsyms(struct tep_handle *pevent, char *file, unsigned int size);
-void tracecmd_parse_ftrace_printk(struct tep_handle *pevent, char *file, unsigned int size);
+#define TSCNSEC_CLOCK	"tsc2nsec"
+
 struct tep_plugin_list *trace_load_plugins(struct tep_handle *tep, int flags);
 
 int *tracecmd_add_id(int *list, int id, int len);
+
+#define FILE_VERSION_MIN		6
+#define FILE_VERSION_MAX		7
+
+#define FILE_VERSION_SECTIONS		7
+#define FILE_VERSION_COMPRESSION	7
 
 enum {
 	RINGBUF_TYPE_PADDING		= 29,
@@ -41,6 +49,7 @@ void tracecmd_set_debug(bool set_debug);
 bool tracecmd_get_debug(void);
 
 bool tracecmd_is_version_supported(unsigned int version);
+int tracecmd_default_file_version(void);
 
 struct tracecmd_output;
 struct tracecmd_recorder;
@@ -85,6 +94,13 @@ tracecmd_plugin_context_output(struct trace_plugin_context *trace_context);
 
 void tracecmd_set_quiet(struct tracecmd_output *handle, bool set_quiet);
 bool tracecmd_get_quiet(struct tracecmd_output *handle);
+void tracecmd_set_out_clock(struct tracecmd_output *handle, const char *clock);
+const char *tracecmd_get_trace_clock(struct tracecmd_input *handle);
+
+const char *tracecmd_get_cpustats(struct tracecmd_input *handle);
+const char *tracecmd_get_uname(struct tracecmd_input *handle);
+const char *tracecmd_get_version(struct tracecmd_input *handle);
+off64_t tracecmd_get_cpu_file_size(struct tracecmd_input *handle, int cpu);
 
 static inline int tracecmd_host_bigendian(void)
 {
@@ -98,7 +114,8 @@ static inline int tracecmd_host_bigendian(void)
 /* --- Opening and Reading the trace.dat file --- */
 
 enum tracecmd_file_states {
-	TRACECMD_FILE_INIT = 1,
+	TRACECMD_FILE_ALLOCATED = 0,
+	TRACECMD_FILE_INIT,
 	TRACECMD_FILE_HEADERS,
 	TRACECMD_FILE_FTRACE_EVENTS,
 	TRACECMD_FILE_ALL_EVENTS,
@@ -126,12 +143,25 @@ enum {
 	TRACECMD_OPTION_TRACEID,
 	TRACECMD_OPTION_TIME_SHIFT,
 	TRACECMD_OPTION_GUEST,
+	TRACECMD_OPTION_TSC2NSEC,
+	TRACECMD_OPTION_STRINGS,
+	TRACECMD_OPTION_HEADER_INFO,
+	TRACECMD_OPTION_FTRACE_EVENTS,
+	TRACECMD_OPTION_EVENT_FORMATS,
+	TRACECMD_OPTION_KALLSYMS,
+	TRACECMD_OPTION_PRINTK,
+	TRACECMD_OPTION_CMDLINES,
+	TRACECMD_OPTION_BUFFER_TEXT,
+	TRACECMD_OPTION_MAX,
 };
 
 enum {
 	TRACECMD_FL_IGNORE_DATE		= (1 << 0),
 	TRACECMD_FL_BUFFER_INSTANCE	= (1 << 1),
 	TRACECMD_FL_IN_USECS		= (1 << 2),
+	TRACECMD_FL_RAW_TS		= (1 << 3),
+	TRACECMD_FL_SECTIONED		= (1 << 4),
+	TRACECMD_FL_COMPRESSION		= (1 << 5),
 };
 
 struct tracecmd_ftrace {
@@ -161,9 +191,16 @@ int tracecmd_get_parsing_failures(struct tracecmd_input *handle);
 int tracecmd_long_size(struct tracecmd_input *handle);
 int tracecmd_page_size(struct tracecmd_input *handle);
 int tracecmd_cpus(struct tracecmd_input *handle);
-int tracecmd_copy_headers(struct tracecmd_input *handle, int fd,
+int tracecmd_copy_headers(struct tracecmd_input *in_handle,
+			  struct tracecmd_output *out_handle,
 			  enum tracecmd_file_states start_state,
 			  enum tracecmd_file_states end_state);
+int tracecmd_copy_buffer_descr(struct tracecmd_input *in_handle,
+			       struct tracecmd_output *out_handle);
+int tracecmd_copy_options(struct tracecmd_input *in_handle,
+			  struct tracecmd_output *out_handle);
+int tracecmd_copy_trace_data(struct tracecmd_input *in_handle,
+			     struct tracecmd_output *out_handle);
 void tracecmd_set_flag(struct tracecmd_input *handle, int flag);
 void tracecmd_clear_flag(struct tracecmd_input *handle, int flag);
 unsigned long tracecmd_get_flags(struct tracecmd_input *handle);
@@ -199,6 +236,8 @@ tracecmd_peek_data_ref(struct tracecmd_input *handle, int cpu)
 	return rec;
 }
 
+int tracecmd_latency_data_read(struct tracecmd_input *handle, char **buf, size_t *size);
+
 struct tep_record *
 tracecmd_read_prev(struct tracecmd_input *handle, struct tep_record *record);
 
@@ -226,6 +265,11 @@ int tracecmd_set_cursor(struct tracecmd_input *handle,
 			int cpu, unsigned long long offset);
 unsigned long long
 tracecmd_get_cursor(struct tracecmd_input *handle, int cpu);
+
+unsigned long tracecmd_get_in_file_version(struct tracecmd_input *handle);
+size_t tracecmd_get_options_offset(struct tracecmd_input *handle);
+int tracecmd_get_file_compress_proto(struct tracecmd_input *handle,
+				     const char **name, const char **version);
 
 int tracecmd_ftrace_overrides(struct tracecmd_input *handle, struct tracecmd_ftrace *finfo);
 bool tracecmd_get_use_trace_clock(struct tracecmd_input *handle);
@@ -259,26 +303,21 @@ struct tracecmd_event_list {
 struct tracecmd_option;
 struct tracecmd_msg_handle;
 
-struct tracecmd_output *tracecmd_create_file_latency(const char *output_file, int cpus);
-struct tracecmd_output *tracecmd_create_file(const char *output_file,
-					     int cpus, char * const *cpu_data_files);
-struct tracecmd_output *
-tracecmd_create_file_glob(const char *output_file,
-			  int cpus, char * const *cpu_data_files,
-			  struct tracecmd_event_list *event_globs);
-struct tracecmd_output *
-tracecmd_create_init_file_glob(const char *output_file,
-			       struct tracecmd_event_list *list);
-struct tracecmd_output *tracecmd_create_init_fd(int fd);
-struct tracecmd_output *
-tracecmd_create_init_fd_glob(int fd, struct tracecmd_event_list *list);
-struct tracecmd_output *
-tracecmd_create_init_fd_msg(struct tracecmd_msg_handle *msg_handle,
-			    struct tracecmd_event_list *list);
-struct tracecmd_output *tracecmd_create_init_file(const char *output_file);
-struct tracecmd_output *tracecmd_create_init_file_override(const char *output_file,
-							   const char *tracing_dir,
-							   const char *kallsyms);
+int tracecmd_output_set_msg(struct tracecmd_output *handle,
+			    struct tracecmd_msg_handle *msg_handle);
+int tracecmd_output_set_trace_dir(struct tracecmd_output *handle, const char *tracing_dir);
+int tracecmd_output_set_kallsyms(struct tracecmd_output *handle, const char *kallsyms);
+int tracecmd_output_set_from_input(struct tracecmd_output *handle, struct tracecmd_input *ihandle);
+int tracecmd_output_set_version(struct tracecmd_output *handle, int file_version);
+int tracecmd_output_set_compression(struct tracecmd_output *handle, const char *compression);
+int tracecmd_output_write_headers(struct tracecmd_output *handle,
+				  struct tracecmd_event_list *list);
+
+struct tracecmd_output *tracecmd_output_create(const char *output_file);
+struct tracecmd_output *tracecmd_output_create_fd(int fd);
+struct tracecmd_output *tracecmd_create_file_latency(const char *output_file, int cpus,
+						     int file_version, const char *compression);
+
 struct tracecmd_option *tracecmd_add_option(struct tracecmd_output *handle,
 					    unsigned short id, int size,
 					    const void *data);
@@ -286,38 +325,38 @@ struct tracecmd_option *
 tracecmd_add_option_v(struct tracecmd_output *handle,
 		      unsigned short id, const struct iovec *vector, int count);
 
-struct tracecmd_option *tracecmd_add_buffer_option(struct tracecmd_output *handle,
-						   const char *name, int cpus);
+int tracecmd_add_buffer_info(struct tracecmd_output *handle, const char *name, int cpus);
+int tracecmd_write_buffer_info(struct tracecmd_output *handle);
 
 int tracecmd_write_cpus(struct tracecmd_output *handle, int cpus);
 int tracecmd_write_cmdlines(struct tracecmd_output *handle);
 int tracecmd_write_options(struct tracecmd_output *handle);
+int tracecmd_write_meta_strings(struct tracecmd_output *handle);
 int tracecmd_append_options(struct tracecmd_output *handle);
-int tracecmd_update_option(struct tracecmd_output *handle,
-			   struct tracecmd_option *option, int size,
-			   const void *data);
 void tracecmd_output_close(struct tracecmd_output *handle);
 void tracecmd_output_free(struct tracecmd_output *handle);
-struct tracecmd_output *tracecmd_copy(struct tracecmd_input *ihandle,
-				      const char *file);
+struct tracecmd_output *tracecmd_copy(struct tracecmd_input *ihandle, const char *file,
+				      enum tracecmd_file_states state, int file_version,
+				      const char *compression);
 
 int tracecmd_write_cpu_data(struct tracecmd_output *handle,
-			    int cpus, char * const *cpu_data_files);
+			    int cpus, char * const *cpu_data_files, const char *buff_name);
 int tracecmd_append_cpu_data(struct tracecmd_output *handle,
 			     int cpus, char * const *cpu_data_files);
 int tracecmd_append_buffer_cpu_data(struct tracecmd_output *handle,
-				    struct tracecmd_option *option,
-				    int cpus, char * const *cpu_data_files);
-
+				    const char *name, int cpus, char * const *cpu_data_files);
 struct tracecmd_output *tracecmd_get_output_handle_fd(int fd);
+unsigned long tracecmd_get_out_file_version(struct tracecmd_output *handle);
+unsigned long long tracecmd_get_out_file_offset(struct tracecmd_output *handle);
 
 /* --- Reading the Fly Recorder Trace --- */
 
 enum {
 	TRACECMD_RECORD_NOSPLICE	= (1 << 0),	/* Use read instead of splice */
 	TRACECMD_RECORD_SNAPSHOT	= (1 << 1),	/* Extract from snapshot */
-	TRACECMD_RECORD_BLOCK		= (1 << 2),	/* Block on splice write */
+	TRACECMD_RECORD_BLOCK_SPLICE	= (1 << 2),	/* Block on splice write */
 	TRACECMD_RECORD_NOBRASS		= (1 << 3),	/* Splice directly without a brass pipe */
+	TRACECMD_RECORD_POLL		= (1 << 4),	/* Use O_NONBLOCK, poll trace buffers */
 };
 
 void tracecmd_free_recorder(struct tracecmd_recorder *recorder);
@@ -338,12 +377,16 @@ enum tracecmd_msg_flags {
 };
 
 /* for both client and server */
+#define MSG_CACHE_FILE "/tmp/trace_msg_cacheXXXXXX"
 struct tracecmd_msg_handle {
 	int			fd;
 	short			cpu_count;
 	short			version;	/* Current protocol version */
 	unsigned long		flags;
 	bool			done;
+	bool			cache;
+	int			cfd;
+	char			cfile[sizeof(MSG_CACHE_FILE)];
 };
 
 struct tracecmd_tsync_protos {
@@ -352,6 +395,7 @@ struct tracecmd_tsync_protos {
 
 struct tracecmd_msg_handle *
 tracecmd_msg_handle_alloc(int fd, unsigned long flags);
+int tracecmd_msg_handle_cache(struct tracecmd_msg_handle *msg_handle);
 
 /* Closes the socket and frees the handle */
 void tracecmd_msg_handle_close(struct tracecmd_msg_handle *msg_handle);
@@ -452,9 +496,9 @@ tracecmd_tsync_with_guest(unsigned long long trace_id, int loop_interval,
 			  unsigned int cid, unsigned int port, int guest_pid,
 			  int guest_cpus, const char *proto_name, const char *clock);
 int tracecmd_tsync_with_guest_stop(struct tracecmd_time_sync *tsync);
-int tracecmd_tsync_get_offsets(struct tracecmd_time_sync *tsync,
-				int *count, long long **ts,
-				long long **offsets, long long **scalings);
+int tracecmd_tsync_get_offsets(struct tracecmd_time_sync *tsync, int cpu,
+			       int *count, long long **ts,
+			       long long **offsets, long long **scalings, long long **frac);
 int tracecmd_tsync_get_session_params(struct tracecmd_time_sync *tsync,
 				      char **selected_proto,
 				      unsigned int *tsync_port);
@@ -462,6 +506,51 @@ void tracecmd_tsync_free(struct tracecmd_time_sync *tsync);
 int tracecmd_write_guest_time_shift(struct tracecmd_output *handle,
 				    struct tracecmd_time_sync *tsync);
 
+/* --- Compression --- */
+struct tracecmd_compress_chunk {
+	unsigned int		size;
+	unsigned int		zsize;
+	off64_t			zoffset;
+	off64_t			offset;
+};
+struct tracecmd_compression;
+struct tracecmd_compression_proto {
+	int weight;
+	const char *name;
+	const char *version;
+	int (*compress)(void *ctx, const void *in, int in_bytes, void *out, int out_bytes);
+	int (*uncompress)(void *ctx, const void *in, int in_bytes, void *out, int out_bytes);
+	unsigned int (*compress_size)(void *ctx, unsigned int bytes);
+	bool (*is_supported)(const char *name, const char *version);
+	void *(*new_context)(void);
+	void (*free_context)(void *ctx);
+};
+
+struct tracecmd_compression *tracecmd_compress_alloc(const char *name, const char *version,
+						     int fd, struct tep_handle *tep,
+						     struct tracecmd_msg_handle *msg_handle);
+void tracecmd_compress_destroy(struct tracecmd_compression *handle);
+int tracecmd_compress_block(struct tracecmd_compression *handle);
+int tracecmd_uncompress_block(struct tracecmd_compression *handle);
+void tracecmd_compress_reset(struct tracecmd_compression *handle);
+int tracecmd_compress_buffer_read(struct tracecmd_compression *handle, char *dst, int len);
+int tracecmd_compress_pread(struct tracecmd_compression *handle, char *dst, int len, off_t offset);
+int tracecmd_compress_buffer_write(struct tracecmd_compression *handle,
+				   const void *data, unsigned long long size);
+off64_t tracecmd_compress_lseek(struct tracecmd_compression *handle, off64_t offset, int whence);
+int tracecmd_compress_proto_get_name(struct tracecmd_compression *compress,
+				     const char **name, const char **version);
+bool tracecmd_compress_is_supported(const char *name, const char *version);
+int tracecmd_compress_protos_get(char ***names, char ***versions);
+int tracecmd_compress_proto_register(struct tracecmd_compression_proto *proto);
+int tracecmd_compress_copy_from(struct tracecmd_compression *handle, int fd, int chunk_size,
+				unsigned long long *read_size, unsigned long long *write_size);
+int tracecmd_uncompress_copy_to(struct tracecmd_compression *handle, int fd,
+				unsigned long long *read_size, unsigned long long *write_size);
+int tracecmd_uncompress_chunk(struct tracecmd_compression *handle,
+			      struct tracecmd_compress_chunk *chunk, char *data);
+int tracecmd_load_chunks_info(struct tracecmd_compression *handle,
+			      struct tracecmd_compress_chunk **chunks_info);
 /* --- Plugin handling --- */
 extern struct tep_plugin_option trace_ftrace_options[];
 
@@ -514,5 +603,22 @@ void *tracecmd_record_page(struct tracecmd_input *handle,
 			   struct tep_record *record);
 void *tracecmd_record_offset(struct tracecmd_input *handle,
 			     struct tep_record *record);
+#ifdef PERF
+
+#include <linux/perf_event.h>
+
+/* trace-cmd Perf */
+struct trace_perf {
+	int fd;
+	int cpu;
+	int pid;
+	int pages;
+	struct perf_event_attr pe;
+	struct perf_event_mmap_page *mmap;
+};
+int trace_perf_init(struct trace_perf *perf, int pages, int cpu, int pid);
+int trace_perf_open(struct trace_perf *perf);
+void trace_perf_close(struct trace_perf *perf);
+#endif
 
 #endif /* _TRACE_CMD_PRIVATE_H */

@@ -106,7 +106,7 @@ static int write_record(struct tracecmd_input *handle,
 		return 0;
 	}
 
-	if (record->size && (record->size < 28 * 4))
+	if (record->size && (record->size <= 28 * 4))
 		len = record->size / 4;
 
 	time = (unsigned)diff;
@@ -118,6 +118,9 @@ static int write_record(struct tracecmd_input *handle,
 
 	if (!len) {
 		len = record->size + 4;
+		if ((len + 4) > record->record_size)
+			die("Bad calculation of record len (expect:%d actual:%d)",
+			    record->record_size, len + 4);
 		*(unsigned *)ptr = tep_read_number(pevent, &len, 4);
 		ptr += 4;
 		index += 4;
@@ -345,7 +348,7 @@ static double parse_file(struct tracecmd_input *handle,
 	dir = dirname(output);
 	base = basename(output);
 
-	ohandle = tracecmd_copy(handle, output_file);
+	ohandle = tracecmd_copy(handle, output_file, TRACECMD_FILE_CMD_LINES, 0, NULL);
 
 	cpus = tracecmd_cpus(handle);
 	cpu_data = malloc(sizeof(*cpu_data) * cpus);
@@ -384,7 +387,9 @@ static double parse_file(struct tracecmd_input *handle,
 	for (cpu = 0; cpu < cpus; cpu ++)
 		cpu_list[cpu] = cpu_data[cpu].file;
 
-	tracecmd_append_cpu_data(ohandle, cpus, cpu_list);
+	tracecmd_set_out_clock(ohandle, tracecmd_get_trace_clock(handle));
+	if (tracecmd_append_cpu_data(ohandle, cpus, cpu_list) < 0)
+		die("Failed to append tracing data\n");
 
 	current = end;
 	for (cpu = 0; cpu < cpus; cpu++) {

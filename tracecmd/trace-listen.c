@@ -606,11 +606,14 @@ static int put_together_file(int cpus, int ofd, const char *node,
 		ret = tracecmd_write_cpus(handle, cpus);
 		if (ret)
 			goto out;
+		ret = tracecmd_write_buffer_info(handle);
+		if (ret)
+			goto out;
 		ret = tracecmd_write_options(handle);
 		if (ret)
 			goto out;
 	}
-	ret = tracecmd_write_cpu_data(handle, cpus, temp_files);
+	ret = tracecmd_write_cpu_data(handle, cpus, temp_files, NULL);
 
 out:
 	tracecmd_output_close(handle);
@@ -916,6 +919,7 @@ static void start_daemon(void)
 }
 
 enum {
+	OPT_verbose	= 254,
 	OPT_debug	= 255,
 };
 
@@ -938,6 +942,7 @@ void trace_listen(int argc, char **argv)
 			{"port", required_argument, NULL, 'p'},
 			{"help", no_argument, NULL, '?'},
 			{"debug", no_argument, NULL, OPT_debug},
+			{"verbose", optional_argument, NULL, OPT_verbose},
 			{NULL, 0, NULL, 0}
 		};
 
@@ -966,6 +971,10 @@ void trace_listen(int argc, char **argv)
 			break;
 		case OPT_debug:
 			tracecmd_set_debug(true);
+			break;
+		case OPT_verbose:
+			if (trace_set_verbose(optarg) < 0)
+				die("invalid verbose level %s", optarg);
 			break;
 		default:
 			usage(argv);

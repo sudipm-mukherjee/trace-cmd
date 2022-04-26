@@ -25,6 +25,12 @@
 
 static struct tep_handle *tep;
 static unsigned int trace_cpus;
+static int has_clock;
+static unsigned long file_version;
+static bool	read_compress;
+static struct tracecmd_compression *compress;
+static char *meta_strings;
+static int meta_strings_size;
 
 enum dump_items {
 	SUMMARY		= (1 << 0),
@@ -38,7 +44,19 @@ enum dump_items {
 	CMDLINES	= (1 << 8),
 	OPTIONS		= (1 << 9),
 	FLYRECORD	= (1 << 10),
+	CLOCK		= (1 << 11),
+	SECTIONS	= (1 << 12),
+	STRINGS		= (1 << 13),
 };
+
+struct file_section {
+	int id;
+	unsigned long long offset;
+	struct file_section *next;
+	enum dump_items verbosity;
+};
+
+static struct file_section *sections;
 
 enum dump_items verbosity;
 
@@ -50,13 +68,49 @@ enum dump_items verbosity;
 			tracecmd_plog(fmt, ##__VA_ARGS__);	\
 	} while (0)
 
+static int read_fd(int fd, char *dst, int len)
+{
+	size_t size = 0;
+	int r;
+
+	do {
+		r = read(fd, dst+size, len);
+		if (r > 0) {
+			size += r;
+			len -= r;
+		} else
+			break;
+	} while (r > 0);
+
+	if (len)
+		return -1;
+	return size;
+}
+
+static int read_compressed(int fd, char *dst, int len)
+{
+
+	if (read_compress)
+		return tracecmd_compress_buffer_read(compress, dst, len);
+
+	return read_fd(fd, dst, len);
+}
+
+static int do_lseek(int fd, int offset, int whence)
+{
+	if (read_compress)
+		return tracecmd_compress_lseek(compress, offset, whence);
+
+	return lseek64(fd, offset, whence);
+}
+
 static int read_file_string(int fd, char *dst, int len)
 {
 	size_t size = 0;
 	int r;
 
 	do {
-		r = read(fd, dst+size, 1);
+		r = read_compressed(fd, dst+size, 1);
 		if (r > 0) {
 			size++;
 			len--;
@@ -73,21 +127,10 @@ static int read_file_string(int fd, char *dst, int len)
 
 static int read_file_bytes(int fd, char *dst, int len)
 {
-	size_t size = 0;
-	int r;
+	int ret;
 
-	do {
-		r = read(fd, dst+size, len);
-		if (r > 0) {
-			size += r;
-			len -= r;
-		} else
-			break;
-	} while (r > 0);
-
-	if (len)
-		return -1;
-	return 0;
+	ret = read_compressed(fd, dst, len);
+	return ret < 0 ? ret : 0;
 }
 
 static void read_dump_string(int fd, int size, enum dump_items id)
@@ -139,24 +182,31 @@ static int read_file_number(int fd, void *digit, int size)
 	return 0;
 }
 
+static const char *get_metadata_string(int offset)
+{
+	if (!meta_strings || offset < 0 || meta_strings_size <= offset)
+		return NULL;
+
+	return meta_strings + offset;
+}
+
 static void dump_initial_format(int fd)
 {
 	char magic[] = TRACECMD_MAGIC;
 	char buf[DUMP_SIZE];
 	int val4;
-	unsigned long ver;
 
 	do_print(SUMMARY, "\t[Initial format]\n");
 
 	/* check initial bytes */
 	if (read_file_bytes(fd, buf, sizeof(magic)))
-		die("cannot read %d bytes magic", sizeof(magic));
+		die("cannot read %zu bytes magic", sizeof(magic));
 	if (memcmp(buf, magic, sizeof(magic)) != 0)
 		die("wrong file magic");
 
 	/* check initial tracing string */
 	if (read_file_bytes(fd, buf, strlen(TRACING_STR)))
-		die("cannot read %d bytes tracing string", strlen(TRACING_STR));
+		die("cannot read %zu bytes tracing string", strlen(TRACING_STR));
 	buf[strlen(TRACING_STR)] = 0;
 	if (strncmp(buf, TRACING_STR, strlen(TRACING_STR)) != 0)
 		die("wrong tracing string: %s", buf);
@@ -166,11 +216,11 @@ static void dump_initial_format(int fd)
 		die("no version string");
 
 	do_print(SUMMARY, "\t\t%s\t[Version]\n", buf);
-	ver = strtol(buf, NULL, 10);
-	if (!ver && errno)
+	file_version = strtol(buf, NULL, 10);
+	if (!file_version && errno)
 		die("Invalid file version string %s", buf);
-	if (!tracecmd_is_version_supported(ver))
-		die("Unsupported file version %lu", ver);
+	if (!tracecmd_is_version_supported(file_version))
+		die("Unsupported file version %lu", file_version);
 
 	/* get file endianness*/
 	if (read_file_bytes(fd, buf, 1))
@@ -190,6 +240,31 @@ static void dump_initial_format(int fd)
 	do_print(SUMMARY, "\t\t%d\t[Page size, bytes]\n", val4);
 }
 
+static void dump_compress(int fd)
+{
+	char zname[DUMP_SIZE];
+	char zver[DUMP_SIZE];
+
+	if (file_version < FILE_VERSION_COMPRESSION)
+		return;
+
+	/* get compression header */
+	if (read_file_string(fd, zname, DUMP_SIZE))
+		die("no compression header");
+
+	if (read_file_string(fd, zver, DUMP_SIZE))
+		die("no compression version");
+
+	do_print((SUMMARY), "\t\t%s\t[Compression algorithm]\n", zname);
+	do_print((SUMMARY), "\t\t%s\t[Compression version]\n", zver);
+
+	if (strcmp(zname, "none")) {
+		compress = tracecmd_compress_alloc(zname, zver, fd, tep, NULL);
+		if (!compress)
+			die("cannot uncompress the file");
+	}
+}
+
 static void dump_header_page(int fd)
 {
 	unsigned long long size;
@@ -199,7 +274,7 @@ static void dump_header_page(int fd)
 
 	/* check header string */
 	if (read_file_bytes(fd, buf, strlen(HEAD_PAGE_STR) + 1))
-		die("cannot read %d bytes header string", strlen(HEAD_PAGE_STR));
+		die("cannot read %zu bytes header string", strlen(HEAD_PAGE_STR));
 	if (strncmp(buf, HEAD_PAGE_STR, strlen(HEAD_PAGE_STR)) != 0)
 		die("wrong header string: %s", buf);
 
@@ -220,7 +295,7 @@ static void dump_header_event(int fd)
 
 	/* check header string */
 	if (read_file_bytes(fd, buf, strlen(HEAD_PAGE_EVENT) + 1))
-		die("cannot read %d bytes header string", strlen(HEAD_PAGE_EVENT));
+		die("cannot read %zu bytes header string", strlen(HEAD_PAGE_EVENT));
 	if (strncmp(buf, HEAD_PAGE_EVENT, strlen(HEAD_PAGE_EVENT)) != 0)
 		die("wrong header string: %s", buf);
 
@@ -230,6 +305,28 @@ static void dump_header_event(int fd)
 	do_print((SUMMARY | HEAD_EVENT), "%lld bytes]\n", size);
 
 	read_dump_string(fd, size, HEAD_EVENT);
+}
+
+static void uncompress_reset(void)
+{
+	if (compress && file_version >= FILE_VERSION_COMPRESSION) {
+		read_compress = false;
+		tracecmd_compress_reset(compress);
+	}
+}
+
+static int uncompress_block(void)
+{
+	int ret = 0;
+
+	if (compress && file_version >= FILE_VERSION_COMPRESSION) {
+		ret = tracecmd_uncompress_block(compress);
+		if (!ret)
+			read_compress = true;
+
+	}
+
+	return ret;
 }
 
 static void dump_ftrace_events_format(int fd)
@@ -268,7 +365,7 @@ static void dump_events_format(int fd)
 	while (systems) {
 
 		if (read_file_string(fd, buf, DUMP_SIZE))
-			die("cannot read the name of the $dth system", systems);
+			die("cannot read the name of the %dth system", systems);
 		if (read_file_number(fd, &events, 4))
 			die("cannot read the count of the events in system %s",
 			     buf);
@@ -341,9 +438,51 @@ static void dump_option_string(int fd, int size, char *desc)
 		read_dump_string(fd, size, OPTIONS);
 }
 
-static void dump_option_buffer(int fd, int size)
+static void dump_section_header(int fd, enum dump_items v, unsigned short *flags)
 {
+	unsigned long long offset, size;
+	unsigned short fl;
+	unsigned short id;
+	const char *desc;
+	int desc_id;
+
+	offset = lseek64(fd, 0, SEEK_CUR);
+	if (read_file_number(fd, &id, 2))
+		die("cannot read the section id");
+
+	if (read_file_number(fd, &fl, 2))
+		die("cannot read the section flags");
+
+	if (read_file_number(fd, &desc_id, 4))
+		die("no section description");
+
+	desc = get_metadata_string(desc_id);
+	if (!desc)
+		desc = "Unknown";
+
+	if (read_file_number(fd, &size, 8))
+		die("cannot read section size");
+
+	do_print(v, "\t[Section %d @ %lld: \"%s\", flags 0x%X, %lld bytes]\n",
+		 id, offset, desc, fl, size);
+
+	if (flags)
+		*flags = fl;
+}
+
+static void dump_option_buffer(int fd, unsigned short option, int size)
+{
+	unsigned long long total_size = 0;
+	unsigned long long data_size;
+	unsigned long long current;
 	unsigned long long offset;
+	unsigned short flags;
+	char clock[DUMP_SIZE];
+	char name[DUMP_SIZE];
+	int page_size;
+	int cpus = 0;
+	int id;
+	int i;
 
 	if (size < 8)
 		die("broken buffer option with size %d", size);
@@ -351,9 +490,63 @@ static void dump_option_buffer(int fd, int size)
 	if (read_file_number(fd, &offset, 8))
 		die("cannot read the offset of the buffer option");
 
-	do_print(OPTIONS, "\t\t[Option BUFFER, %d bytes]\n", size);
-	do_print(OPTIONS, "%lld [offset]\n", offset);
-	read_dump_string(fd, size - 8, OPTIONS);
+	if (read_file_string(fd, name, DUMP_SIZE))
+		die("cannot read the name of the buffer option");
+
+	if (file_version < FILE_VERSION_SECTIONS) {
+		do_print(OPTIONS|FLYRECORD, "\t\t[Option BUFFER, %d bytes]\n", size);
+		do_print(OPTIONS|FLYRECORD, "%lld [offset]\n", offset);
+		do_print(OPTIONS|FLYRECORD, "\"%s\" [name]\n", name);
+		return;
+	}
+
+	current = lseek64(fd, 0, SEEK_CUR);
+	if (lseek64(fd, offset, SEEK_SET) == (off_t)-1)
+		die("cannot goto buffer offset %lld", offset);
+
+	dump_section_header(fd, FLYRECORD, &flags);
+
+	if (lseek64(fd, current, SEEK_SET) == (off_t)-1)
+		die("cannot go back to buffer option");
+
+	do_print(OPTIONS|FLYRECORD, "\t\t[Option BUFFER, %d bytes]\n", size);
+	do_print(OPTIONS|FLYRECORD, "%lld [offset]\n", offset);
+	do_print(OPTIONS|FLYRECORD, "\"%s\" [name]\n", name);
+
+	if (read_file_string(fd, clock, DUMP_SIZE))
+		die("cannot read clock of the buffer option");
+
+	do_print(OPTIONS|FLYRECORD, "\"%s\" [clock]\n", clock);
+	if (option == TRACECMD_OPTION_BUFFER) {
+		if (read_file_number(fd, &page_size, 4))
+			die("cannot read the page size of the buffer option");
+		do_print(OPTIONS|FLYRECORD, "%d [Page size, bytes]\n", page_size);
+
+		if (read_file_number(fd, &cpus, 4))
+			die("cannot read the cpu count of the buffer option");
+
+		do_print(OPTIONS|FLYRECORD, "%d [CPUs]:\n", cpus);
+		for (i = 0; i < cpus; i++) {
+			if (read_file_number(fd, &id, 4))
+				die("cannot read the id of cpu %d from the buffer option", i);
+
+			if (read_file_number(fd, &offset, 8))
+				die("cannot read the offset of cpu %d from the buffer option", i);
+
+			if (read_file_number(fd, &data_size, 8))
+				die("cannot read the data size of cpu %d from the buffer option", i);
+
+			total_size += data_size;
+			do_print(OPTIONS|FLYRECORD, "   %d %lld\t%lld\t[id, data offset and size]\n",
+				 id, offset, data_size);
+		}
+		do_print(SUMMARY, "\t\[buffer \"%s\", \"%s\" clock, %d page size, "
+			 "%d cpus, %lld bytes flyrecord data]\n",
+			 name, clock, page_size, cpus, total_size);
+	} else {
+		do_print(SUMMARY, "\t\[buffer \"%s\", \"%s\" clock, latency data]\n", name, clock);
+	}
+
 }
 
 static void dump_option_int(int fd, int size, char *desc)
@@ -374,15 +567,21 @@ static void dump_option_xlong(int fd, int size, char *desc)
 	do_print(OPTIONS, "0x%llX\n", val);
 }
 
+struct time_shift_cpu {
+	unsigned int count;
+	long long *scalings;
+	long long *frac;
+	long long *offsets;
+	unsigned long long *times;
+};
+
 static void dump_option_timeshift(int fd, int size)
 {
-	long long *scalings = NULL;
-	long long *offsets = NULL;
-	long long *times = NULL;
+	struct time_shift_cpu *cpus_data;
 	long long trace_id;
-	unsigned int count;
 	unsigned int flags;
-	int i;
+	unsigned int cpus;
+	int i, j;
 
 	/*
 	 * long long int (8 bytes) trace session ID
@@ -397,36 +596,81 @@ static void dump_option_timeshift(int fd, int size)
 	}
 	do_print(OPTIONS, "\t\t[Option TimeShift, %d bytes]\n", size);
 	read_file_number(fd, &trace_id, 8);
+	size -= 8;
 	do_print(OPTIONS, "0x%llX [peer's trace id]\n", trace_id);
 	read_file_number(fd, &flags, 4);
+	size -= 4;
 	do_print(OPTIONS, "0x%llX [peer's protocol flags]\n", flags);
-	read_file_number(fd, &count, 4);
-	do_print(OPTIONS, "%lld [samples count]\n", count);
-	times = calloc(count, sizeof(long long));
-	if (!times)
-		goto out;
-	offsets = calloc(count, sizeof(long long));
-	if (!offsets)
-		goto out;
-	scalings = calloc(count, sizeof(long long));
-	if (!scalings)
-		goto out;
+	read_file_number(fd, &cpus, 4);
+	size -= 4;
+	do_print(OPTIONS, "0x%llX [peer's CPU count]\n", cpus);
+	cpus_data = calloc(cpus, sizeof(struct time_shift_cpu));
+	if (!cpus_data)
+		return;
+	for (j = 0; j < cpus; j++) {
+		if (size < 4)
+			goto out;
+		read_file_number(fd, &cpus_data[j].count, 4);
+		size -= 4;
+		do_print(OPTIONS, "%lld [samples count for CPU %d]\n", cpus_data[j].count, j);
+		cpus_data[j].times = calloc(cpus_data[j].count, sizeof(long long));
+		cpus_data[j].offsets = calloc(cpus_data[j].count, sizeof(long long));
+		cpus_data[j].scalings = calloc(cpus_data[j].count, sizeof(long long));
+		cpus_data[j].frac = calloc(cpus_data[j].count, sizeof(long long));
+		if (!cpus_data[j].times || !cpus_data[j].offsets ||
+		    !cpus_data[j].scalings || !cpus_data[j].frac)
+			goto out;
+		for (i = 0; i < cpus_data[j].count; i++) {
+			if (size < 8)
+				goto out;
+			read_file_number(fd, cpus_data[j].times + i, 8);
+			size -= 8;
+		}
+		for (i = 0; i < cpus_data[j].count; i++) {
+			if (size < 8)
+				goto out;
+			read_file_number(fd, cpus_data[j].offsets + i, 8);
+			size -= 8;
+		}
+		for (i = 0; i < cpus_data[j].count; i++) {
+			if (size < 8)
+				goto out;
+			read_file_number(fd, cpus_data[j].scalings + i, 8);
+			size -= 8;
+		}
+	}
 
-	for (i = 0; i < count; i++)
-		read_file_number(fd, times + i, 8);
-	for (i = 0; i < count; i++)
-		read_file_number(fd, offsets + i, 8);
-	for (i = 0; i < count; i++)
-		read_file_number(fd, scalings + i, 8);
+	if (size > 0) {
+		for (j = 0; j < cpus; j++) {
+			if (!cpus_data[j].frac)
+				goto out;
+			for (i = 0; i < cpus_data[j].count; i++) {
+				if (size < 8)
+					goto out;
+				read_file_number(fd, cpus_data[j].frac + i, 8);
+				size -= 8;
+			}
+		}
+	}
 
-	for (i = 0; i < count; i++)
-		do_print(OPTIONS, "\t%lld * %lld %lld [offset * scaling @ time]\n",
-			 offsets[i], scalings[1], times[i]);
+	for (j = 0; j < cpus; j++) {
+		for (i = 0; i < cpus_data[j].count; i++)
+			do_print(OPTIONS, "\t%lld %lld %llu %llu[offset * scaling >> fraction @ time]\n",
+				 cpus_data[j].offsets[i], cpus_data[j].scalings[i],
+				 cpus_data[j].frac[i], cpus_data[j].times[i]);
+
+	}
 
 out:
-	free(times);
-	free(offsets);
-	free(scalings);
+	if (j < cpus)
+		do_print(OPTIONS, "Broken time shift option\n");
+	for (j = 0; j < cpus; j++) {
+		free(cpus_data[j].times);
+		free(cpus_data[j].offsets);
+		free(cpus_data[j].scalings);
+		free(cpus_data[j].frac);
+	}
+	free(cpus_data);
 }
 
 void dump_option_guest(int fd, int size)
@@ -488,25 +732,130 @@ out:
 	free(buf);
 }
 
-static void dump_options(int fd)
+void dump_option_tsc2nsec(int fd, int size)
 {
+	int mult, shift;
+	unsigned long long offset;
+
+	do_print(OPTIONS, "\n\t\t[Option TSC2NSEC, %d bytes]\n", size);
+
+	if (read_file_number(fd, &mult, 4))
+		die("cannot read tsc2nsec multiplier");
+	if (read_file_number(fd, &shift, 4))
+		die("cannot read tsc2nsec shift");
+	if (read_file_number(fd, &offset, 8))
+		die("cannot read tsc2nsec offset");
+	do_print(OPTIONS, "%d %d %llu [multiplier, shift, offset]\n", mult, shift, offset);
+}
+
+static void dump_option_section(int fd, unsigned int size,
+				unsigned short id, char *desc, enum dump_items v)
+{
+	struct file_section *sec;
+
+	sec = calloc(1, sizeof(struct file_section));
+	if (!sec)
+		die("cannot allocate new section");
+
+	sec->next = sections;
+	sections = sec;
+	sec->id = id;
+	sec->verbosity = v;
+	if (read_file_number(fd, &sec->offset, 8))
+		die("cannot read the option %d offset", id);
+
+	do_print(OPTIONS, "\t\t[Option %s, %d bytes] @ %lld\n", desc, size, sec->offset);
+}
+
+static void dump_sections(int fd, int count)
+{
+	struct file_section *sec = sections;
+	unsigned short flags;
+
+	while (sec) {
+		if (lseek64(fd, sec->offset, SEEK_SET) == (off_t)-1)
+			die("cannot goto option offset %lld", sec->offset);
+
+		dump_section_header(fd, sec->verbosity, &flags);
+
+		if ((flags & TRACECMD_SEC_FL_COMPRESS) && uncompress_block())
+			die("cannot uncompress section block");
+
+		switch (sec->id) {
+		case TRACECMD_OPTION_HEADER_INFO:
+			dump_header_page(fd);
+			dump_header_event(fd);
+			break;
+		case TRACECMD_OPTION_FTRACE_EVENTS:
+			dump_ftrace_events_format(fd);
+			break;
+		case TRACECMD_OPTION_EVENT_FORMATS:
+			dump_events_format(fd);
+			break;
+		case TRACECMD_OPTION_KALLSYMS:
+			dump_kallsyms(fd);
+			break;
+		case TRACECMD_OPTION_PRINTK:
+			dump_printk(fd);
+			break;
+		case TRACECMD_OPTION_CMDLINES:
+			dump_cmdlines(fd);
+			break;
+		}
+		uncompress_reset();
+		sec = sec->next;
+	}
+	do_print(SUMMARY|SECTIONS, "\t[%d sections]\n", count);
+}
+
+static int dump_options_read(int fd);
+
+static int dump_option_done(int fd, int size)
+{
+	unsigned long long offset;
+
+	do_print(OPTIONS, "\t\t[Option DONE, %d bytes]\n", size);
+
+	if (file_version < FILE_VERSION_SECTIONS || size < 8)
+		return 0;
+
+	if (read_file_number(fd, &offset, 8))
+		die("cannot read the next options offset");
+
+	do_print(OPTIONS, "%lld\n", offset);
+	if (!offset)
+		return 0;
+
+	if (lseek64(fd, offset, SEEK_SET) == (off_t)-1)
+		die("cannot goto next options offset %lld", offset);
+
+	do_print(OPTIONS, "\n\n");
+
+	return dump_options_read(fd);
+}
+
+static int dump_options_read(int fd)
+{
+	unsigned short flags = 0;
 	unsigned short option;
 	unsigned int size;
 	int count = 0;
 
+	if (file_version >= FILE_VERSION_SECTIONS)
+		dump_section_header(fd, OPTIONS, &flags);
+
+	if ((flags & TRACECMD_SEC_FL_COMPRESS) && uncompress_block())
+		die("cannot uncompress file block");
+
 	for (;;) {
 		if (read_file_number(fd, &option, 2))
 			die("cannot read the option id");
-		if (!option)
+		if (option == TRACECMD_OPTION_DONE && file_version < FILE_VERSION_SECTIONS)
 			break;
 		if (read_file_number(fd, &size, 4))
 			die("cannot read the option size");
 
 		count++;
-		if (!DUMP_CHECK(OPTIONS)) {
-			lseek64(fd, size, SEEK_CUR);
-			continue;
-		}
 		switch (option) {
 		case TRACECMD_OPTION_DATE:
 			dump_option_string(fd, size, "DATE");
@@ -515,10 +864,13 @@ static void dump_options(int fd)
 			dump_option_string(fd, size, "CPUSTAT");
 			break;
 		case TRACECMD_OPTION_BUFFER:
-			dump_option_buffer(fd, size);
+		case TRACECMD_OPTION_BUFFER_TEXT:
+			dump_option_buffer(fd, option, size);
 			break;
 		case TRACECMD_OPTION_TRACECLOCK:
-			dump_option_string(fd, size, "TRACECLOCK");
+			do_print(OPTIONS, "\t\t[Option TRACECLOCK, %d bytes]\n", size);
+			read_dump_string(fd, size, OPTIONS | CLOCK);
+			has_clock = 1;
 			break;
 		case TRACECMD_OPTION_UNAME:
 			dump_option_string(fd, size, "UNAME");
@@ -547,20 +899,77 @@ static void dump_options(int fd)
 		case TRACECMD_OPTION_GUEST:
 			dump_option_guest(fd, size);
 			break;
+		case TRACECMD_OPTION_TSC2NSEC:
+			dump_option_tsc2nsec(fd, size);
+			break;
+		case TRACECMD_OPTION_HEADER_INFO:
+			dump_option_section(fd, size, option, "HEADERS", HEAD_PAGE | HEAD_EVENT);
+			break;
+		case TRACECMD_OPTION_FTRACE_EVENTS:
+			dump_option_section(fd, size, option, "FTRACE EVENTS", FTRACE_FORMAT);
+			break;
+		case TRACECMD_OPTION_EVENT_FORMATS:
+			dump_option_section(fd, size, option,
+					    "EVENT FORMATS", EVENT_SYSTEMS | EVENT_FORMAT);
+			break;
+		case TRACECMD_OPTION_KALLSYMS:
+			dump_option_section(fd, size, option, "KALLSYMS", KALLSYMS);
+			break;
+		case TRACECMD_OPTION_PRINTK:
+			dump_option_section(fd, size, option, "PRINTK", TRACE_PRINTK);
+			break;
+		case TRACECMD_OPTION_CMDLINES:
+			dump_option_section(fd, size, option, "CMDLINES", CMDLINES);
+			break;
+		case TRACECMD_OPTION_DONE:
+			uncompress_reset();
+			count += dump_option_done(fd, size);
+			return count;
 		default:
 			do_print(OPTIONS, " %d %d\t[Unknown option, size - skipping]\n",
 				 option, size);
-			lseek64(fd, size, SEEK_CUR);
+			do_lseek(fd, size, SEEK_CUR);
 			break;
 		}
 	}
-	do_print(SUMMARY, "\t[%d options]\n", count);
+	uncompress_reset();
+	return count;
+}
 
+static void dump_options(int fd)
+{
+	int count;
+
+	count = dump_options_read(fd);
+	do_print(SUMMARY|OPTIONS, "\t[%d options]\n", count);
 }
 
 static void dump_latency(int fd)
 {
 	do_print(SUMMARY, "\t[Latency tracing data]\n");
+}
+
+static void dump_clock(int fd)
+{
+	long long size;
+	char *clock;
+
+	do_print((SUMMARY | CLOCK), "\t[Tracing clock]\n");
+	if (!has_clock) {
+		do_print((SUMMARY | CLOCK), "\t\t No tracing clock saved in the file\n");
+		return;
+	}
+	if (read_file_number(fd, &size, 8))
+		die("cannot read clock size");
+	clock = calloc(1, size);
+	if (!clock)
+		die("cannot allocate clock %lld bytes", size);
+
+	if (read_file_bytes(fd, clock, size))
+		die("cannot read clock %lld bytes", size);
+	clock[size] = 0;
+	do_print((SUMMARY | CLOCK), "\t\t%s\n", clock);
+	free(clock);
 }
 
 static void dump_flyrecord(int fd)
@@ -576,9 +985,10 @@ static void dump_flyrecord(int fd)
 			die("cannot read the cpu %d offset", i);
 		if (read_file_number(fd, &cpu_size, 8))
 			die("cannot read the cpu %d size", i);
-		do_print(FLYRECORD, "\t\t %lld %lld\t[offset, size of cpu %d]\n",
+		do_print(FLYRECORD, "\t %10.lld %10.lld\t[offset, size of cpu %d]\n",
 			 cpu_offset, cpu_size, i);
 	}
+	dump_clock(fd);
 }
 
 static void dump_therest(int fd)
@@ -602,6 +1012,182 @@ static void dump_therest(int fd)
 	}
 }
 
+static void dump_v6_file(int fd)
+{
+	dump_header_page(fd);
+	dump_header_event(fd);
+	dump_ftrace_events_format(fd);
+	dump_events_format(fd);
+	dump_kallsyms(fd);
+	dump_printk(fd);
+	dump_cmdlines(fd);
+	dump_cpus_count(fd);
+	dump_therest(fd);
+}
+
+static int read_metadata_strings(int fd, unsigned long long size)
+{
+	char *str, *strings;
+	int psize;
+	int ret;
+
+	strings = realloc(meta_strings, meta_strings_size + size);
+	if (!strings)
+		return -1;
+	meta_strings = strings;
+
+	ret = read_file_bytes(fd, meta_strings + meta_strings_size, size);
+	if (ret < 0)
+		return -1;
+
+	do_print(STRINGS, "\t[String @ offset]\n");
+	psize = 0;
+	while (psize < size) {
+		str = meta_strings + meta_strings_size + psize;
+		do_print(STRINGS, "\t\t\"%s\" @ %d\n", str, meta_strings_size + psize);
+		psize += strlen(str) + 1;
+	}
+
+	meta_strings_size += size;
+
+	return 0;
+}
+
+static void get_meta_strings(int fd)
+{
+	unsigned long long offset, size;
+	unsigned int csize, rsize;
+	unsigned short fl, id;
+	int desc_id;
+
+	offset = lseek64(fd, 0, SEEK_CUR);
+	do {
+		if (read_file_number(fd, &id, 2))
+			break;
+		if (read_file_number(fd, &fl, 2))
+			die("cannot read section flags");
+		if (read_file_number(fd, &desc_id, 4))
+			die("cannot read section description");
+		if (read_file_number(fd, &size, 8))
+			die("cannot read section size");
+		if (id == TRACECMD_OPTION_STRINGS) {
+			if ((fl & TRACECMD_SEC_FL_COMPRESS)) {
+				read_file_number(fd, &csize, 4);
+				read_file_number(fd, &rsize, 4);
+				lseek64(fd, -8, SEEK_CUR);
+				if (uncompress_block())
+					break;
+			} else {
+				rsize = size;
+			}
+			read_metadata_strings(fd, rsize);
+			uncompress_reset();
+		} else {
+			if (lseek64(fd, size, SEEK_CUR) == (off_t)-1)
+				break;
+		}
+	} while (1);
+
+	if (lseek64(fd, offset, SEEK_SET) == (off_t)-1)
+		die("cannot restore the original file location");
+}
+
+static int walk_v7_sections(int fd)
+{
+	unsigned long long offset, soffset, size;
+	unsigned short fl;
+	unsigned short id;
+	int csize, rsize;
+	int count = 0;
+	int desc_id;
+	const char *desc;
+
+	offset = lseek64(fd, 0, SEEK_CUR);
+	do {
+		soffset = lseek64(fd, 0, SEEK_CUR);
+		if (read_file_number(fd, &id, 2))
+			break;
+
+		if (read_file_number(fd, &fl, 2))
+			die("cannot read section flags");
+
+		if (read_file_number(fd, &desc_id, 4))
+			die("cannot read section description");
+
+		desc = get_metadata_string(desc_id);
+		if (!desc)
+			desc = "Unknown";
+
+		if (read_file_number(fd, &size, 8))
+			die("cannot read section size");
+
+		if (id >= TRACECMD_OPTION_MAX)
+			do_print(SECTIONS, "Unknown section id %d: %s", id, desc);
+
+		count++;
+		if (fl & TRACECMD_SEC_FL_COMPRESS) {
+			if (id == TRACECMD_OPTION_BUFFER ||
+			    id == TRACECMD_OPTION_BUFFER_TEXT) {
+				do_print(SECTIONS,
+					"\t[Section %2d @ %-16lld\t\"%s\", flags 0x%X, "
+					"%lld compressed bytes]\n",
+					 id, soffset, desc, fl, size);
+			} else {
+				if (read_file_number(fd, &csize, 4))
+					die("cannot read section size");
+
+				if (read_file_number(fd, &rsize, 4))
+					die("cannot read section size");
+
+				do_print(SECTIONS, "\t[Section %2d @ %-16lld\t\"%s\", flags 0x%X, "
+					 "%d compressed, %d uncompressed]\n",
+					 id, soffset, desc, fl, csize, rsize);
+				size -= 8;
+			}
+		} else {
+			do_print(SECTIONS, "\t[Section %2d @ %-16lld\t\"%s\", flags 0x%X, %lld bytes]\n",
+				 id, soffset, desc, fl, size);
+		}
+
+		if (lseek64(fd, size, SEEK_CUR) == (off_t)-1)
+			break;
+	} while (1);
+
+	if (lseek64(fd, offset, SEEK_SET) == (off_t)-1)
+		die("cannot restore the original file location");
+
+	return count;
+}
+
+static void dump_v7_file(int fd)
+{
+	long long offset;
+	int sections;
+
+	if (read_file_number(fd, &offset, 8))
+		die("cannot read offset of the first option section");
+
+	get_meta_strings(fd);
+	sections = walk_v7_sections(fd);
+
+	if (lseek64(fd, offset, SEEK_SET) == (off_t)-1)
+		die("cannot goto options offset %lld", offset);
+
+	dump_options(fd);
+	dump_sections(fd, sections);
+}
+
+static void free_sections(void)
+{
+	struct file_section *del;
+
+	while (sections) {
+		del = sections;
+		sections = sections->next;
+		free(del);
+	}
+}
+
 static void dump_file(const char *file)
 {
 	int fd;
@@ -617,22 +1203,22 @@ static void dump_file(const char *file)
 	do_print(SUMMARY, "\n Tracing meta data in file %s:\n", file);
 
 	dump_initial_format(fd);
-	dump_header_page(fd);
-	dump_header_event(fd);
-	dump_ftrace_events_format(fd);
-	dump_events_format(fd);
-	dump_kallsyms(fd);
-	dump_printk(fd);
-	dump_cmdlines(fd);
-	dump_cpus_count(fd);
-	dump_therest(fd);
-
+	dump_compress(fd);
+	if (file_version < FILE_VERSION_SECTIONS)
+		dump_v6_file(fd);
+	else
+		dump_v7_file(fd);
+	free_sections();
 	tep_free(tep);
 	tep = NULL;
 	close(fd);
 }
 
 enum {
+	OPT_sections	= 240,
+	OPT_strings	= 241,
+	OPT_verbose	= 242,
+	OPT_clock	= 243,
 	OPT_all		= 244,
 	OPT_summary	= 245,
 	OPT_flyrecord	= 246,
@@ -673,8 +1259,12 @@ void trace_dump(int argc, char **argv)
 			{"cmd-lines", no_argument, NULL, OPT_cmd_lines},
 			{"options", no_argument, NULL, OPT_options},
 			{"flyrecord", no_argument, NULL, OPT_flyrecord},
+			{"clock", no_argument, NULL, OPT_clock},
+			{"strings", no_argument, NULL, OPT_strings},
+			{"sections", no_argument, NULL, OPT_sections},
 			{"validate", no_argument, NULL, 'v'},
 			{"help", no_argument, NULL, '?'},
+			{"verbose", optional_argument, NULL, OPT_verbose},
 			{NULL, 0, NULL, 0}
 		};
 
@@ -727,6 +1317,19 @@ void trace_dump(int argc, char **argv)
 			break;
 		case OPT_head_page:
 			verbosity |= HEAD_PAGE;
+			break;
+		case OPT_clock:
+			verbosity |= CLOCK;
+			break;
+		case OPT_verbose:
+			if (trace_set_verbose(optarg) < 0)
+				die("invalid verbose level %s", optarg);
+			break;
+		case OPT_strings:
+			verbosity |= STRINGS;
+			break;
+		case OPT_sections:
+			verbosity |= SECTIONS;
 			break;
 		default:
 			usage(argv);

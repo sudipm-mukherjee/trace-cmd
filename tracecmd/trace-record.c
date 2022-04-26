@@ -57,6 +57,7 @@
 #define MAX_LATENCY	"tracing_max_latency"
 #define STAMP		"stamp"
 #define FUNC_STACK_TRACE "func_stack_trace"
+#define TSC_CLOCK	"x86-tsc"
 
 enum trace_type {
 	TRACE_TYPE_RECORD	= 1,
@@ -197,7 +198,11 @@ struct common_record_context {
 	const char *output;
 	char *date2ts;
 	char *user;
+	const char *clock;
+	const char *compression;
+	struct tsc_nsec tsc2nsec;
 	int data_flags;
+	int tsync_loop_interval;
 
 	int record_all;
 	int total_disable;
@@ -210,6 +215,7 @@ struct common_record_context {
 	int topt;
 	int run_command;
 	int saved_cmdlines_size;
+	int file_version;
 };
 
 static void add_reset_file(const char *file, const char *val, int prio)
@@ -665,7 +671,24 @@ static void delete_thread_data(void)
 	}
 }
 
-static void host_tsync_complete(struct buffer_instance *instance)
+static void
+add_tsc2nsec(struct tracecmd_output *handle, struct tsc_nsec *tsc2nsec)
+{
+	/* multiplier, shift, offset */
+	struct iovec vector[3];
+
+	vector[0].iov_len = 4;
+	vector[0].iov_base = &tsc2nsec->mult;
+	vector[1].iov_len = 4;
+	vector[1].iov_base = &tsc2nsec->shift;
+	vector[2].iov_len = 8;
+	vector[2].iov_base = &tsc2nsec->offset;
+
+	tracecmd_add_option_v(handle, TRACECMD_OPTION_TSC2NSEC, vector, 3);
+}
+
+static void host_tsync_complete(struct common_record_context *ctx,
+				struct buffer_instance *instance)
 {
 	struct tracecmd_output *handle = NULL;
 	int fd = -1;
@@ -679,7 +702,12 @@ static void host_tsync_complete(struct buffer_instance *instance)
 		handle = tracecmd_get_output_handle_fd(fd);
 		if (!handle)
 			die("cannot create output handle");
+
+		if (ctx->tsc2nsec.mult)
+			add_tsc2nsec(handle, &ctx->tsc2nsec);
+
 		tracecmd_write_guest_time_shift(handle, instance->tsync);
+		tracecmd_append_options(handle);
 		tracecmd_output_close(handle);
 	}
 
@@ -687,7 +715,7 @@ static void host_tsync_complete(struct buffer_instance *instance)
 	instance->tsync = NULL;
 }
 
-static void tell_guests_to_stop(void)
+static void tell_guests_to_stop(struct common_record_context *ctx)
 {
 	struct buffer_instance *instance;
 
@@ -699,7 +727,7 @@ static void tell_guests_to_stop(void)
 
 	for_all_instances(instance) {
 		if (is_guest(instance))
-			host_tsync_complete(instance);
+			host_tsync_complete(ctx, instance);
 	}
 
 	/* Wait for guests to acknowledge */
@@ -803,13 +831,14 @@ static int set_ftrace_proc(int set)
 	return ret;
 }
 
-static int set_ftrace(int set, int use_proc)
+static int set_ftrace(struct buffer_instance *instance, int set, int use_proc)
 {
 	char *path;
 	int ret;
 
-	/* First check if the function-trace option exists */
-	path = tracefs_get_tracing_file("options/function-trace");
+	path = tracefs_instance_get_file(instance->tracefs, "options/function-trace");
+	if (!path)
+		return -1;
 	ret = set_ftrace_enable(path, set);
 	tracefs_put_tracing_file(path);
 
@@ -817,7 +846,7 @@ static int set_ftrace(int set, int use_proc)
 	if (ret < 0 || set || use_proc)
 		ret = set_ftrace_proc(set);
 
-	return 0;
+	return ret;
 }
 
 static int write_file(const char *file, const char *str)
@@ -2739,8 +2768,9 @@ void tracecmd_enable_events(void)
 	enable_events(first_instance);
 }
 
-static void set_clock(struct buffer_instance *instance)
+static void set_clock(struct common_record_context *ctx, struct buffer_instance *instance)
 {
+	const char *clock;
 	char *path;
 	char *content;
 	char *str;
@@ -2748,7 +2778,12 @@ static void set_clock(struct buffer_instance *instance)
 	if (is_guest(instance))
 		return;
 
-	if (!instance->clock)
+	if (instance->clock)
+		clock = instance->clock;
+	else
+		clock = ctx->clock;
+
+	if (!clock)
 		return;
 
 	/* The current clock is in brackets, reset it when we are done */
@@ -2771,7 +2806,7 @@ static void set_clock(struct buffer_instance *instance)
 	tracefs_put_tracing_file(path);
 
 	tracefs_instance_file_write(instance->tracefs,
-				    "trace_clock", instance->clock);
+				    "trace_clock", clock);
 }
 
 static void set_max_graph_depth(struct buffer_instance *instance, char *max_graph_depth)
@@ -2908,6 +2943,21 @@ static void test_event(struct event_list *event, const char *path,
 	*save = event;
 }
 
+static void print_event(const char *fmt, ...)
+{
+	va_list ap;
+
+	if (!show_status)
+		return;
+
+	va_start(ap, fmt);
+	vprintf(fmt, ap);
+	va_end(ap);
+
+	printf("\n");
+}
+
+
 static int expand_event_files(struct buffer_instance *instance,
 			      const char *file, struct event_list *old_event)
 {
@@ -2940,7 +2990,7 @@ static int expand_event_files(struct buffer_instance *instance,
 		path = globbuf.gl_pathv[i];
 
 		event = create_event(instance, path, old_event);
-		pr_info("%s\n", path);
+		print_event("%s\n", path);
 
 		len = strlen(path);
 
@@ -3203,6 +3253,38 @@ static int do_accept(int sd)
 	return -1;
 }
 
+/* Find all the tasks associated with the guest pid */
+static void find_tasks(struct trace_guest *guest)
+{
+	struct dirent *dent;
+	char *path;
+	DIR *dir;
+	int ret;
+	int tasks = 0;
+
+	ret = asprintf(&path, "/proc/%d/task", guest->pid);
+	if (ret < 0)
+		return;
+
+	dir = opendir(path);
+	free(path);
+	if (!dir)
+		return;
+
+	while ((dent = readdir(dir))) {
+		int *pids;
+		if (!(dent->d_type == DT_DIR && is_digits(dent->d_name)))
+			continue;
+		pids = realloc(guest->task_pids, sizeof(int) * (tasks + 2));
+		if (!pids)
+			break;
+		pids[tasks++] = strtol(dent->d_name, NULL, 0);
+		pids[tasks] = -1;
+		guest->task_pids = pids;
+	}
+	closedir(dir);
+}
+
 static char *parse_guest_name(char *gname, int *cid, int *port)
 {
 	struct trace_guest *guest;
@@ -3223,13 +3305,15 @@ static char *parse_guest_name(char *gname, int *cid, int *port)
 	} else if (is_digits(gname))
 		*cid = atoi(gname);
 
-	read_qemu_guests();
-	if (*cid > 0)
-		guest = get_guest_by_cid(*cid);
-	else
-		guest = get_guest_by_name(gname);
+	if (*cid < 0)
+		read_qemu_guests();
+
+	guest = trace_get_guest(*cid, gname);
 	if (guest) {
 		*cid = guest->cid;
+		/* Mapping not found, search for them */
+		if (!guest->cpu_pid)
+			find_tasks(guest);
 		return guest->name;
 	}
 
@@ -3251,7 +3335,7 @@ create_recorder_instance_pipe(struct buffer_instance *instance,
 			      int cpu, int *brass)
 {
 	struct tracecmd_recorder *recorder;
-	unsigned flags = recorder_flags | TRACECMD_RECORD_BLOCK;
+	unsigned flags = recorder_flags | TRACECMD_RECORD_BLOCK_SPLICE;
 	char *path;
 
 	path = tracefs_instance_get_dir(instance->tracefs);
@@ -3607,6 +3691,35 @@ again:
 
 static void add_options(struct tracecmd_output *handle, struct common_record_context *ctx);
 
+static struct tracecmd_output *create_net_output(struct common_record_context *ctx,
+						 struct tracecmd_msg_handle *msg_handle)
+{
+	struct tracecmd_output *out;
+
+	out = tracecmd_output_create(NULL);
+	if (!out)
+		return NULL;
+	if (ctx->file_version && tracecmd_output_set_version(out, ctx->file_version))
+		goto error;
+	if (tracecmd_output_set_msg(out, msg_handle))
+		goto error;
+
+	if (ctx->compression) {
+		if (tracecmd_output_set_compression(out, ctx->compression))
+			goto error;
+	} else if (ctx->file_version >= FILE_VERSION_COMPRESSION) {
+		tracecmd_output_set_compression(out, "any");
+	}
+
+	if (tracecmd_output_write_headers(out, listed_events))
+		goto error;
+
+	return out;
+error:
+	tracecmd_output_close(out);
+	return NULL;
+}
+
 static struct tracecmd_msg_handle *
 setup_connection(struct buffer_instance *instance, struct common_record_context *ctx)
 {
@@ -3618,7 +3731,7 @@ setup_connection(struct buffer_instance *instance, struct common_record_context 
 
 	/* Now create the handle through this socket */
 	if (msg_handle->version == V3_PROTOCOL) {
-		network_handle = tracecmd_create_init_fd_msg(msg_handle, listed_events);
+		network_handle = create_net_output(ctx, msg_handle);
 		if (!network_handle)
 			goto error;
 		tracecmd_set_quiet(network_handle, quiet);
@@ -3629,6 +3742,9 @@ setup_connection(struct buffer_instance *instance, struct common_record_context 
 		ret = tracecmd_write_cpus(network_handle, instance->cpu_count);
 		if (ret)
 			goto error;
+		ret = tracecmd_write_buffer_info(network_handle);
+		if (ret)
+			goto error;
 		ret = tracecmd_write_options(network_handle);
 		if (ret)
 			goto error;
@@ -3636,9 +3752,20 @@ setup_connection(struct buffer_instance *instance, struct common_record_context 
 		if (ret)
 			goto error;
 	} else {
-		network_handle = tracecmd_create_init_fd_glob(msg_handle->fd,
-							      listed_events);
+		network_handle = tracecmd_output_create_fd(msg_handle->fd);
 		if (!network_handle)
+			goto error;
+		if (tracecmd_output_set_version(network_handle, ctx->file_version))
+			goto error;
+
+		if (ctx->compression) {
+			if (tracecmd_output_set_compression(network_handle, ctx->compression))
+				goto error;
+		} else if (ctx->file_version >= FILE_VERSION_COMPRESSION) {
+			tracecmd_output_set_compression(network_handle, "any");
+		}
+
+		if (tracecmd_output_write_headers(network_handle, listed_events))
 			goto error;
 		tracecmd_set_quiet(network_handle, quiet);
 	}
@@ -3688,29 +3815,191 @@ static int open_guest_fifos(const char *guest, int **fds)
 	return i;
 }
 
-static int host_tsync(struct buffer_instance *instance,
+struct trace_mapping {
+	struct tep_event		*kvm_entry;
+	struct tep_format_field		*vcpu_id;
+	struct tep_format_field		*common_pid;
+	int				*pids;
+	int				*map;
+	int				max_cpus;
+};
+
+static void start_mapping_vcpus(struct trace_guest *guest)
+{
+	char *pids = NULL;
+	char *t;
+	int len = 0;
+	int s;
+	int i;
+
+	if (!guest->task_pids)
+		return;
+
+	guest->instance = tracefs_instance_create("map_guest_pids");
+	if (!guest->instance)
+		return;
+
+	for (i = 0; guest->task_pids[i] >= 0; i++) {
+		s = snprintf(NULL, 0, "%d ", guest->task_pids[i]);
+		t = realloc(pids, len + s + 1);
+		if (!t) {
+			free(pids);
+			pids = NULL;
+			break;
+		}
+		pids = t;
+		sprintf(pids + len, "%d ", guest->task_pids[i]);
+		len += s;
+	}
+	if (pids) {
+		tracefs_instance_file_write(guest->instance, "set_event_pid", pids);
+		free(pids);
+	}
+	tracefs_instance_file_write(guest->instance, "events/kvm/kvm_entry/enable", "1");
+}
+
+static int map_vcpus(struct tep_event *event, struct tep_record *record,
+		     int cpu, void *context)
+{
+	struct trace_mapping *tmap = context;
+	unsigned long long val;
+	int type;
+	int pid;
+	int ret;
+	int i;
+
+	/* Do we have junk in the buffer? */
+	type = tep_data_type(event->tep, record);
+	if (type != tmap->kvm_entry->id)
+		return 0;
+
+	ret = tep_read_number_field(tmap->common_pid, record->data, &val);
+	if (ret < 0)
+		return 0;
+	pid = (int)val;
+
+	for (i = 0; tmap->pids[i] >= 0; i++) {
+		if (pid == tmap->pids[i])
+			break;
+	}
+	/* Is this thread one we care about ? */
+	if (tmap->pids[i] < 0)
+		return 0;
+
+	ret = tep_read_number_field(tmap->vcpu_id, record->data, &val);
+	if (ret < 0)
+		return 0;
+
+	cpu = (int)val;
+
+	/* Sanity check, warn? */
+	if (cpu >= tmap->max_cpus)
+		return 0;
+
+	/* Already have this one? Should we check if it is the same? */
+	if (tmap->map[cpu] >= 0)
+		return 0;
+
+	tmap->map[cpu] = pid;
+
+	/* Did we get them all */
+	for (i = 0; i < tmap->max_cpus; i++) {
+		if (tmap->map[i] < 0)
+			break;
+	}
+
+	return i == tmap->max_cpus;
+}
+
+static void stop_mapping_vcpus(struct buffer_instance *instance,
+			       struct trace_guest *guest)
+{
+	struct trace_mapping tmap = { };
+	struct tep_handle *tep;
+	const char *systems[] = { "kvm", NULL };
+	int i;
+
+	if (!guest->instance)
+		return;
+
+	tmap.pids = guest->task_pids;
+	tmap.max_cpus = instance->cpu_count;
+
+	tmap.map = malloc(sizeof(*tmap.map) * tmap.max_cpus);
+	if (!tmap.map)
+		return;
+
+	for (i = 0; i < tmap.max_cpus; i++)
+		tmap.map[i] = -1;
+
+	tracefs_instance_file_write(guest->instance, "events/kvm/kvm_entry/enable", "0");
+
+	tep = tracefs_local_events_system(NULL, systems);
+	if (!tep)
+		goto out;
+
+	tmap.kvm_entry = tep_find_event_by_name(tep, "kvm", "kvm_entry");
+	if (!tmap.kvm_entry)
+		goto out_free;
+
+	tmap.vcpu_id = tep_find_field(tmap.kvm_entry, "vcpu_id");
+	if (!tmap.vcpu_id)
+		goto out_free;
+
+	tmap.common_pid = tep_find_any_field(tmap.kvm_entry, "common_pid");
+	if (!tmap.common_pid)
+		goto out_free;
+
+	tracefs_iterate_raw_events(tep, guest->instance, NULL, 0, map_vcpus, &tmap);
+
+	for (i = 0; i < tmap.max_cpus; i++) {
+		if (tmap.map[i] < 0)
+			break;
+	}
+	/* We found all the mapped CPUs */
+	if (i == tmap.max_cpus) {
+		guest->cpu_pid = tmap.map;
+		guest->cpu_max = tmap.max_cpus;
+		tmap.map = NULL;
+	}
+
+ out_free:
+	tep_free(tep);
+ out:
+	free(tmap.map);
+	tracefs_instance_destroy(guest->instance);
+	tracefs_instance_free(guest->instance);
+}
+
+static int host_tsync(struct common_record_context *ctx,
+		      struct buffer_instance *instance,
 		      unsigned int tsync_port, char *proto)
 {
 	struct trace_guest *guest;
 
 	if (!proto)
 		return -1;
-	guest = get_guest_by_cid(instance->cid);
+	guest = trace_get_guest(instance->cid, NULL);
 	if (guest == NULL)
 		return -1;
+
+	start_mapping_vcpus(guest);
 
 	instance->tsync = tracecmd_tsync_with_guest(top_instance.trace_id,
 						    instance->tsync_loop_interval,
 						    instance->cid, tsync_port,
-						    guest->pid, guest->cpu_max,
-						    proto, top_instance.clock);
+						    guest->pid, instance->cpu_count,
+						    proto, ctx->clock);
+	stop_mapping_vcpus(instance, guest);
+
 	if (!instance->tsync)
 		return -1;
 
 	return 0;
 }
 
-static void connect_to_agent(struct buffer_instance *instance)
+static void connect_to_agent(struct common_record_context *ctx,
+			     struct buffer_instance *instance)
 {
 	struct tracecmd_tsync_protos *protos = NULL;
 	int sd, ret, nr_fifos, nr_cpus, page_size;
@@ -3763,7 +4052,8 @@ static void connect_to_agent(struct buffer_instance *instance)
 			printf("Negotiated %s time sync protocol with guest %s\n",
 				tsync_protos_reply,
 				instance->name);
-			host_tsync(instance, tsync_port, tsync_protos_reply);
+			instance->cpu_count = nr_cpus;
+			host_tsync(ctx, instance, tsync_port, tsync_protos_reply);
 		} else
 			warning("Failed to negotiate timestamps synchronization with the guest");
 	}
@@ -3809,7 +4099,7 @@ static void setup_guest(struct buffer_instance *instance)
 
 	fd = open(file, O_CREAT|O_WRONLY|O_TRUNC, 0644);
 	if (fd < 0)
-		die("Failed to open", file);
+		die("Failed to open %s", file);
 
 	/* Start reading tracing metadata */
 	if (tracecmd_msg_read_data(msg_handle, fd))
@@ -3822,12 +4112,13 @@ static void setup_agent(struct buffer_instance *instance,
 {
 	struct tracecmd_output *network_handle;
 
-	network_handle = tracecmd_create_init_fd_msg(instance->msg_handle,
-						     listed_events);
+	network_handle = create_net_output(ctx, instance->msg_handle);
 	add_options(network_handle, ctx);
 	tracecmd_write_cmdlines(network_handle);
 	tracecmd_write_cpus(network_handle, instance->cpu_count);
+	tracecmd_write_buffer_info(network_handle);
 	tracecmd_write_options(network_handle);
+	tracecmd_write_meta_strings(network_handle);
 	tracecmd_msg_finish_sending_data(instance->msg_handle);
 	instance->network_handle = network_handle;
 }
@@ -3842,7 +4133,7 @@ void start_threads(enum trace_type type, struct common_record_context *ctx)
 	for_all_instances(instance) {
 		/* Start the connection now to find out how many CPUs we need */
 		if (is_guest(instance))
-			connect_to_agent(instance);
+			connect_to_agent(ctx, instance);
 		total_cpu_count += instance->cpu_count;
 	}
 
@@ -3905,7 +4196,6 @@ static void touch_file(const char *file)
 }
 
 static void append_buffer(struct tracecmd_output *handle,
-			  struct tracecmd_option *buffer_option,
 			  struct buffer_instance *instance,
 			  char **temp_files)
 {
@@ -3933,7 +4223,7 @@ static void append_buffer(struct tracecmd_output *handle,
 			touch_file(temp_files[i]);
 	}
 
-	tracecmd_append_buffer_cpu_data(handle, buffer_option,
+	tracecmd_append_buffer_cpu_data(handle, tracefs_instance_get_name(instance->tracefs),
 					cpu_count, temp_files);
 
 	for (i = 0; i < instance->cpu_count; i++) {
@@ -3946,21 +4236,19 @@ static void append_buffer(struct tracecmd_output *handle,
 static void
 add_guest_info(struct tracecmd_output *handle, struct buffer_instance *instance)
 {
-	struct trace_guest *guest = get_guest_by_cid(instance->cid);
+	struct trace_guest *guest = trace_get_guest(instance->cid, NULL);
 	char *buf, *p;
 	int size;
+	int pid;
 	int i;
 
 	if (!guest)
 		return;
-	for (i = 0; i < guest->cpu_max; i++)
-		if (!guest->cpu_pid[i])
-			break;
 
 	size = strlen(guest->name) + 1;
-	size +=  sizeof(long long);	/* trace_id */
-	size +=  sizeof(int);		/* cpu count */
-	size += i * 2 * sizeof(int);	/* cpu,pid pair */
+	size += sizeof(long long);	/* trace_id */
+	size += sizeof(int);		/* cpu count */
+	size += instance->cpu_count * 2 * sizeof(int);	/* cpu,pid pair */
 
 	buf = calloc(1, size);
 	if (!buf)
@@ -3972,14 +4260,16 @@ add_guest_info(struct tracecmd_output *handle, struct buffer_instance *instance)
 	memcpy(p, &instance->trace_id, sizeof(long long));
 	p += sizeof(long long);
 
-	memcpy(p, &i, sizeof(int));
+	memcpy(p, &instance->cpu_count, sizeof(int));
 	p += sizeof(int);
-	for (i = 0; i < guest->cpu_max; i++) {
-		if (!guest->cpu_pid[i])
-			break;
+	for (i = 0; i < instance->cpu_count; i++) {
+		if (i < guest->cpu_max)
+			pid = guest->cpu_pid[i];
+		else
+			pid = -1;
 		memcpy(p, &i, sizeof(int));
 		p += sizeof(int);
-		memcpy(p, &guest->cpu_pid[i], sizeof(int));
+		memcpy(p, &pid, sizeof(int));
 		p += sizeof(int);
 	}
 
@@ -4104,15 +4394,34 @@ static void print_stat(struct buffer_instance *instance)
 		trace_seq_do_printf(&instance->s_print[cpu]);
 }
 
+static char *get_trace_clock(bool selected)
+{
+	struct buffer_instance *instance;
+
+	for_all_instances(instance) {
+		if (is_guest(instance))
+			continue;
+		break;
+	}
+
+	if (selected)
+		return tracefs_get_clock(instance ? instance->tracefs : NULL);
+	else
+		return tracefs_instance_file_read(instance ? instance->tracefs : NULL,
+						  "trace_clock", NULL);
+}
+
 enum {
 	DATA_FL_NONE		= 0,
 	DATA_FL_DATE		= 1,
 	DATA_FL_OFFSET		= 2,
+	DATA_FL_GUEST		= 4,
 };
 
 static void add_options(struct tracecmd_output *handle, struct common_record_context *ctx)
 {
 	int type = 0;
+	char *clocks;
 
 	if (ctx->date2ts) {
 		if (ctx->data_flags & DATA_FL_DATE)
@@ -4124,12 +4433,15 @@ static void add_options(struct tracecmd_output *handle, struct common_record_con
 	if (type)
 		tracecmd_add_option(handle, type, strlen(ctx->date2ts)+1, ctx->date2ts);
 
-	tracecmd_add_option(handle, TRACECMD_OPTION_TRACECLOCK, 0, NULL);
+	clocks = get_trace_clock(false);
+	tracecmd_add_option(handle, TRACECMD_OPTION_TRACECLOCK,
+			    clocks ? strlen(clocks)+1 : 0, clocks);
 	add_option_hooks(handle);
 	add_uname(handle);
 	add_version(handle);
 	if (!no_top_instance())
 		add_trace_id(handle, &top_instance);
+	free(clocks);
 }
 
 static void write_guest_file(struct buffer_instance *instance)
@@ -4148,7 +4460,8 @@ static void write_guest_file(struct buffer_instance *instance)
 	handle = tracecmd_get_output_handle_fd(fd);
 	if (!handle)
 		die("error writing to %s", file);
-
+	if (instance->flags & BUFFER_FL_TSC2NSEC)
+		tracecmd_set_out_clock(handle, TSCNSEC_CLOCK);
 	temp_files = malloc(sizeof(*temp_files) * cpu_count);
 	if (!temp_files)
 		die("failed to allocate temp_files for %d cpus",
@@ -4160,7 +4473,7 @@ static void write_guest_file(struct buffer_instance *instance)
 			die("failed to allocate memory");
 	}
 
-	if (tracecmd_write_cpu_data(handle, cpu_count, temp_files) < 0)
+	if (tracecmd_write_cpu_data(handle, cpu_count, temp_files, NULL) < 0)
 		die("failed to write CPU data");
 	tracecmd_output_close(handle);
 
@@ -4169,9 +4482,39 @@ static void write_guest_file(struct buffer_instance *instance)
 	free(temp_files);
 }
 
+static struct tracecmd_output *create_output(struct common_record_context *ctx)
+{
+	struct tracecmd_output *out;
+
+	if (!ctx->output)
+		return NULL;
+
+	out = tracecmd_output_create(ctx->output);
+	if (!out)
+		goto error;
+	if (ctx->file_version && tracecmd_output_set_version(out, ctx->file_version))
+		goto error;
+
+	if (ctx->compression) {
+		if (tracecmd_output_set_compression(out, ctx->compression))
+			goto error;
+	} else if (ctx->file_version >= FILE_VERSION_COMPRESSION) {
+		tracecmd_output_set_compression(out, "any");
+	}
+
+	if (tracecmd_output_write_headers(out, listed_events))
+		goto error;
+
+	return out;
+error:
+	if (out)
+		tracecmd_output_close(out);
+	unlink(ctx->output);
+	return NULL;
+}
+
 static void record_data(struct common_record_context *ctx)
 {
-	struct tracecmd_option **buffer_options;
 	struct tracecmd_output *handle;
 	struct buffer_instance *instance;
 	bool local = false;
@@ -4192,7 +4535,8 @@ static void record_data(struct common_record_context *ctx)
 		return;
 
 	if (latency) {
-		handle = tracecmd_create_file_latency(ctx->output, local_cpu_count);
+		handle = tracecmd_create_file_latency(ctx->output, local_cpu_count,
+						      ctx->file_version, ctx->compression);
 		tracecmd_set_quiet(handle, quiet);
 	} else {
 		if (!local_cpu_count)
@@ -4223,7 +4567,7 @@ static void record_data(struct common_record_context *ctx)
 				touch_file(temp_files[i]);
 		}
 
-		handle = tracecmd_create_init_file_glob(ctx->output, listed_events);
+		handle = create_output(ctx);
 		if (!handle)
 			die("Error creating output file");
 		tracecmd_set_quiet(handle, quiet);
@@ -4240,9 +4584,6 @@ static void record_data(struct common_record_context *ctx)
 		}
 
 		if (buffers) {
-			buffer_options = malloc(sizeof(*buffer_options) * buffers);
-			if (!buffer_options)
-				die("Failed to allocate buffer options");
 			i = 0;
 			for_each_instance(instance) {
 				int cpus = instance->cpu_count != local_cpu_count ?
@@ -4250,10 +4591,9 @@ static void record_data(struct common_record_context *ctx)
 
 				if (instance->msg_handle)
 					continue;
-
-				buffer_options[i++] = tracecmd_add_buffer_option(handle,
-										 tracefs_instance_get_name(instance->tracefs),
-										 cpus);
+				tracecmd_add_buffer_info(handle,
+							tracefs_instance_get_name(instance->tracefs),
+							cpus);
 				add_buffer_stat(handle, instance);
 			}
 		}
@@ -4270,6 +4610,10 @@ static void record_data(struct common_record_context *ctx)
 				add_guest_info(handle, instance);
 		}
 
+		if (ctx->tsc2nsec.mult) {
+			add_tsc2nsec(handle, &ctx->tsc2nsec);
+			tracecmd_set_out_clock(handle, TSCNSEC_CLOCK);
+		}
 		if (tracecmd_write_cmdlines(handle))
 			die("Writing cmdlines");
 
@@ -4284,7 +4628,7 @@ static void record_data(struct common_record_context *ctx)
 				if (instance->msg_handle)
 					continue;
 				print_stat(instance);
-				append_buffer(handle, buffer_options[i++], instance, temp_files);
+				append_buffer(handle, instance, temp_files);
 			}
 		}
 
@@ -4293,6 +4637,79 @@ static void record_data(struct common_record_context *ctx)
 	if (!handle)
 		die("could not write to file");
 	tracecmd_output_close(handle);
+}
+
+enum filter_type {
+	FUNC_FILTER,
+	FUNC_NOTRACE,
+};
+
+static int filter_command(struct tracefs_instance *instance, const char *cmd)
+{
+	return tracefs_instance_file_append(instance, "set_ftrace_filter", cmd);
+}
+
+static int write_func_filter(enum filter_type type, struct buffer_instance *instance,
+			     struct func_list **list)
+{
+	struct func_list *item, *cmds = NULL;
+	const char *file;
+	int ret = -1;
+	int (*filter_function)(struct tracefs_instance *instance, const char *filter,
+			       const char *module, unsigned int flags);
+
+	if (!*list)
+		return 0;
+
+	switch (type) {
+	case FUNC_FILTER:
+		filter_function = tracefs_function_filter;
+		file = "set_ftrace_filter";
+		break;
+	case FUNC_NOTRACE:
+		filter_function = tracefs_function_notrace;
+		file = "set_ftrace_notrace";
+		break;
+	}
+
+	ret = filter_function(instance->tracefs, NULL, NULL,
+			      TRACEFS_FL_RESET | TRACEFS_FL_CONTINUE);
+	if (ret < 0)
+		return ret;
+
+	while (*list) {
+		item = *list;
+		*list = item->next;
+		/* Do commands separately at the end */
+		if (type == FUNC_FILTER && strstr(item->func, ":")) {
+			item->next = cmds;
+			cmds = item;
+			continue;
+		}
+		ret = filter_function(instance->tracefs, item->func, item->mod,
+				      TRACEFS_FL_CONTINUE);
+		if (ret < 0)
+			goto failed;
+		free(item);
+	}
+	ret = filter_function(instance->tracefs, NULL, NULL, 0);
+
+	/* Now add any commands */
+	while (cmds) {
+		item = cmds;
+		cmds = item->next;
+		ret = filter_command(instance->tracefs, item->func);
+		if (ret < 0)
+			goto failed;
+		free(item);
+	}
+	return ret;
+ failed:
+	die("Failed to write %s to %s.\n"
+	    "Perhaps this function is not available for tracing.\n"
+	    "run 'trace-cmd list -f %s' to see if it is.",
+	    item->func, file, item->func);
+	return ret;
 }
 
 static int write_func_file(struct buffer_instance *instance,
@@ -4383,7 +4800,7 @@ static void set_funcs(struct buffer_instance *instance)
 	if (is_guest(instance))
 		return;
 
-	ret = write_func_file(instance, "set_ftrace_filter", &instance->filter_funcs);
+	ret = write_func_filter(FUNC_FILTER, instance, &instance->filter_funcs);
 	if (ret < 0)
 		die("set_ftrace_filter does not exist. Can not filter functions");
 
@@ -4399,13 +4816,13 @@ static void set_funcs(struct buffer_instance *instance)
 				set_notrace = 1;
 		}
 		if (!set_notrace) {
-			ret = write_func_file(instance, "set_ftrace_notrace",
+			ret = write_func_filter(FUNC_NOTRACE, instance,
 					      &instance->notrace_funcs);
 			if (ret < 0)
 				die("set_ftrace_notrace does not exist. Can not filter functions");
 		}
 	} else
-		write_func_file(instance, "set_ftrace_notrace", &instance->notrace_funcs);
+		write_func_filter(FUNC_NOTRACE, instance, &instance->notrace_funcs);
 
 	/* make sure we are filtering functions */
 	if (func_stack && is_top_instance(instance)) {
@@ -4447,11 +4864,12 @@ static int find_ts(struct tep_event *event, struct tep_record *record,
 	return 0;
 }
 
-static unsigned long long find_time_stamp(struct tep_handle *tep)
+static unsigned long long find_time_stamp(struct tep_handle *tep,
+					  struct tracefs_instance *instance)
 {
 	unsigned long long ts = 0;
 
-	if (!tracefs_iterate_raw_events(tep, NULL, NULL, 0, find_ts, &ts))
+	if (!tracefs_iterate_raw_events(tep, instance, NULL, 0, find_ts, &ts))
 		return ts;
 
 	return 0;
@@ -4463,52 +4881,59 @@ static char *read_top_file(char *file, int *psize)
 	return tracefs_instance_file_read(top_instance.tracefs, file, psize);
 }
 
+static struct tep_handle *get_ftrace_tep(void)
+{
+	const char *systems[] = {"ftrace", NULL};
+	struct tep_handle *tep;
+	char *buf;
+	int size;
+	int ret;
+
+	tep = tracefs_local_events_system(NULL, systems);
+	if (!tep)
+		return NULL;
+	tep_set_file_bigendian(tep, tracecmd_host_bigendian());
+	buf = read_top_file("events/header_page", &size);
+	if (!buf)
+		goto error;
+	ret = tep_parse_header_page(tep, buf, size, sizeof(unsigned long));
+	free(buf);
+	if (ret < 0)
+		goto error;
+
+	return tep;
+
+error:
+	tep_free(tep);
+	return NULL;
+}
+
 /*
  * Try to write the date into the ftrace buffer and then
  * read it back, mapping the timestamp to the date.
  */
 static char *get_date_to_ts(void)
 {
-	const char *systems[] = {"ftrace", NULL};
+	struct tep_handle *tep;
 	unsigned long long min = -1ULL;
 	unsigned long long diff;
 	unsigned long long stamp;
 	unsigned long long min_stamp;
 	unsigned long long min_ts;
 	unsigned long long ts;
-	struct tep_handle *tep;
 	struct timespec start;
 	struct timespec end;
 	char *date2ts = NULL;
-	char *path;
-	char *buf;
-	int size;
 	int tfd;
-	int ret;
 	int i;
 
 	/* Set up a tep to read the raw format */
-	tep = tracefs_local_events_system(NULL, systems);
+	tep = get_ftrace_tep();
 	if (!tep) {
 		warning("failed to alloc tep, --date ignored");
 		return NULL;
 	}
-
-	tep_set_file_bigendian(tep, tracecmd_host_bigendian());
-
-	buf = read_top_file("events/header_page", &size);
-	if (!buf)
-		goto out_pevent;
-	ret = tep_parse_header_page(tep, buf, size, sizeof(unsigned long));
-	free(buf);
-	if (ret < 0) {
-		warning("Can't parse header page, --date ignored");
-		goto out_pevent;
-	}
-
-	path = tracefs_get_tracing_file("trace_marker");
-	tfd = open(path, O_WRONLY);
-	tracefs_put_tracing_file(path);
+	tfd = tracefs_instance_file_open(NULL, "trace_marker", O_WRONLY);
 	if (tfd < 0) {
 		warning("Can not open 'trace_marker', --date ignored");
 		goto out_pevent;
@@ -4524,7 +4949,7 @@ static char *get_date_to_ts(void)
 		clock_gettime(CLOCK_REALTIME, &end);
 
 		tracecmd_disable_tracing();
-		ts = find_time_stamp(tep);
+		ts = find_time_stamp(tep, NULL);
 		if (!ts)
 			continue;
 
@@ -4833,40 +5258,12 @@ static void clear_error_log(void)
 		clear_instance_error_log(instance);
 }
 
-static void clear_all_synth_events(void)
+static void clear_all_dynamic_events(void)
 {
-	char sevent[BUFSIZ];
-	char *save = NULL;
-	char *line;
-	char *file;
-	char *buf;
-	int len;
-
-	file = tracefs_instance_get_file(NULL, "synthetic_events");
-	if (!file)
-		return;
-
-	buf = read_file(file);
-	if (!buf)
-		goto out;
-
-	sevent[0] = '!';
-
-	for (line = strtok_r(buf, "\n", &save); line; line = strtok_r(NULL, "\n", &save)) {
-		len = strlen(line);
-		if (len > BUFSIZ - 2)
-			len = BUFSIZ - 2;
-		strncpy(sevent + 1, line, len);
-		sevent[len + 1] = '\0';
-		write_file(file, sevent);
-	}
-out:
-	free(buf);
-	tracefs_put_tracing_file(file);
-
+	/* Clear event probes first, as they may be attached to other dynamic event */
+	tracefs_dynevent_destroy_all(TRACEFS_DYNEVENT_EPROBE, true);
+	tracefs_dynevent_destroy_all(TRACEFS_DYNEVENT_ALL, true);
 }
-
-
 
 static void clear_func_filters(void)
 {
@@ -5385,6 +5782,10 @@ void init_top_instance(void)
 }
 
 enum {
+	OPT_compression		= 237,
+	OPT_file_ver		= 238,
+	OPT_verbose		= 239,
+	OPT_tsc2nsec		= 240,
 	OPT_fork		= 241,
 	OPT_tsyncinterval	= 242,
 	OPT_user		= 243,
@@ -5403,6 +5804,8 @@ enum {
 	OPT_module		= 256,
 	OPT_nofifos		= 257,
 	OPT_cmdlines_size	= 258,
+	OPT_poll		= 259,
+	OPT_name		= 260,
 };
 
 void trace_stop(int argc, char **argv)
@@ -5560,7 +5963,7 @@ void trace_reset(int argc, char **argv)
 	set_buffer_size();
 	clear_filters();
 	clear_triggers();
-	clear_all_synth_events();
+	clear_all_dynamic_events();
 	clear_error_log();
 	/* set clock to "local" */
 	reset_clock();
@@ -5581,6 +5984,7 @@ static void init_common_record_context(struct common_record_context *ctx,
 	ctx->instance = &top_instance;
 	ctx->curr_cmd = curr_cmd;
 	local_cpu_count = tracecmd_count_cpus();
+	ctx->file_version = tracecmd_default_file_version();
 	init_top_instance();
 }
 
@@ -5680,6 +6084,95 @@ check_instance_die(struct buffer_instance *instance, char *param)
 		    tracefs_instance_get_name(instance->tracefs), param);
 }
 
+static bool clock_is_supported(struct tracefs_instance *instance, const char *clock)
+{
+	char *all_clocks = NULL;
+	char *ret = NULL;
+
+	all_clocks  = tracefs_instance_file_read(instance, "trace_clock", NULL);
+	if (!all_clocks)
+		return false;
+
+	ret = strstr(all_clocks, clock);
+	if (ret && (ret == all_clocks || ret[-1] == ' ' || ret[-1] == '[')) {
+		switch (ret[strlen(clock)]) {
+		case ' ':
+		case '\0':
+		case ']':
+		case '\n':
+			break;
+		default:
+			ret = NULL;
+		}
+	} else {
+		ret = NULL;
+	}
+	free(all_clocks);
+
+	return ret != NULL;
+}
+
+#ifdef PERF
+static int get_tsc_nsec(int *shift, int *mult)
+{
+	static int cpu_shift, cpu_mult;
+	static int supported;
+	int cpus = tracecmd_count_cpus();
+	struct trace_perf perf;
+	int i;
+
+	if (supported)
+		goto out;
+
+	supported = -1;
+	if (trace_perf_init(&perf, 1, 0, getpid()))
+		return -1;
+	if (trace_perf_open(&perf))
+		return -1;
+	cpu_shift = perf.mmap->time_shift;
+	cpu_mult = perf.mmap->time_mult;
+	for (i = 1; i < cpus; i++) {
+		trace_perf_close(&perf);
+		if (trace_perf_init(&perf, 1, i, getpid()))
+			break;
+		if (trace_perf_open(&perf))
+			break;
+		if (perf.mmap->time_shift != cpu_shift ||
+		    perf.mmap->time_mult != cpu_mult) {
+			warning("Found different TSC multiplier and shift for CPU %d: %d;%d instead of %d;%d",
+				i, perf.mmap->time_mult, perf.mmap->time_shift, cpu_mult, cpu_shift);
+			break;
+		}
+	}
+	trace_perf_close(&perf);
+	if (i < cpus)
+		return -1;
+
+	if (cpu_shift || cpu_mult)
+		supported = 1;
+out:
+	if (supported < 0)
+		return -1;
+
+	if (shift)
+		*shift = cpu_shift;
+	if (mult)
+		*mult = cpu_mult;
+
+	return 0;
+}
+#else
+static int get_tsc_nsec(int *shift, int *mult)
+{
+	return -1;
+}
+#endif
+
+bool trace_tsc2nsec_is_supported(void)
+{
+	return get_tsc_nsec(NULL, NULL) == 0;
+}
+
 static void parse_record_options(int argc,
 				 char **argv,
 				 enum trace_cmd curr_cmd,
@@ -5695,7 +6188,6 @@ static void parse_record_options(int argc,
 	int name_counter = 0;
 	int negative = 0;
 	struct buffer_instance *instance, *del_list = NULL;
-	bool guest_sync_set = false;
 	int do_children = 0;
 	int fpids_count = 0;
 
@@ -5729,6 +6221,12 @@ static void parse_record_options(int argc,
 			{"module", required_argument, NULL, OPT_module},
 			{"tsync-interval", required_argument, NULL, OPT_tsyncinterval},
 			{"fork", no_argument, NULL, OPT_fork},
+			{"tsc2nsec", no_argument, NULL, OPT_tsc2nsec},
+			{"poll", no_argument, NULL, OPT_poll},
+			{"name", required_argument, NULL, OPT_name},
+			{"verbose", optional_argument, NULL, OPT_verbose},
+			{"compression", required_argument, NULL, OPT_compression},
+			{"file-version", required_argument, NULL, OPT_file_ver},
 			{NULL, 0, NULL, 0}
 		};
 
@@ -5744,7 +6242,7 @@ static void parse_record_options(int argc,
 		 * If the current instance is to record a guest, then save
 		 * all the arguments for this instance.
 		 */
-		if (c != 'B' && c != 'A' && is_guest(ctx->instance)) {
+		if (c != 'B' && c != 'A' && c != OPT_name && is_guest(ctx->instance)) {
 			add_arg(ctx->instance, c, opts, long_options, optarg);
 			if (c == 'C')
 				ctx->instance->flags |= BUFFER_FL_HAS_CLOCK;
@@ -5805,6 +6303,17 @@ static void parse_record_options(int argc,
 			add_trigger(event, optarg);
 			break;
 
+		case OPT_name:
+			if (!ctx->instance)
+				die("No instance defined for name option\n");
+			if (!is_guest(ctx->instance))
+				die("  --name is only used for -A options\n");
+			free(ctx->instance->name);
+			ctx->instance->name = strdup(optarg);
+			if (!ctx->instance->name)
+				die("Failed to allocate name");
+			break;
+
 		case 'A': {
 			char *name = NULL;
 			int cid = -1, port = -1;
@@ -5820,8 +6329,13 @@ static void parse_record_options(int argc,
 			if (!name || !*name) {
 				ret = asprintf(&name, "unnamed-%d", name_counter++);
 				if (ret < 0)
-					die("Failed to allocate guest name");
+					name = NULL;
+			} else {
+				/* Needs to be allocate */
+				name = strdup(name);
 			}
+			if (!name)
+				die("Failed to allocate guest name");
 
 			ctx->instance = allocate_instance(name);
 			ctx->instance->flags |= BUFFER_FL_GUEST;
@@ -5829,6 +6343,7 @@ static void parse_record_options(int argc,
 			ctx->instance->port = port;
 			ctx->instance->name = name;
 			add_instance(ctx->instance, 0);
+			ctx->data_flags |= DATA_FL_GUEST;
 			break;
 		}
 		case 'F':
@@ -5874,10 +6389,24 @@ static void parse_record_options(int argc,
 			break;
 		case 'C':
 			check_instance_die(ctx->instance, "-C");
-			ctx->instance->clock = optarg;
+			if (strcmp(optarg, TSCNSEC_CLOCK) == 0) {
+				ret = get_tsc_nsec(&ctx->tsc2nsec.shift,
+						   &ctx->tsc2nsec.mult);
+				if (ret)
+					die("TSC to nanosecond is not supported");
+				ctx->instance->flags |= BUFFER_FL_TSC2NSEC;
+				ctx->instance->clock = TSC_CLOCK;
+			} else {
+				ctx->instance->clock = optarg;
+			}
+			if (!clock_is_supported(NULL, ctx->instance->clock))
+				die("Clock %s is not supported", ctx->instance->clock);
+			ctx->instance->clock = strdup(ctx->instance->clock);
+			if (!ctx->instance->clock)
+				die("Failed allocation");
 			ctx->instance->flags |= BUFFER_FL_HAS_CLOCK;
-			if (is_top_instance(ctx->instance))
-				guest_sync_set = true;
+			if (!ctx->clock && !is_guest(ctx->instance))
+				ctx->clock = ctx->instance->clock;
 			break;
 		case 'v':
 			negative = 1;
@@ -6121,17 +6650,53 @@ static void parse_record_options(int argc,
 			break;
 		case OPT_tsyncinterval:
 			cmd_check_die(ctx, CMD_set, *(argv+1), "--tsync-interval");
-			top_instance.tsync_loop_interval = atoi(optarg);
-			guest_sync_set = true;
+			ctx->tsync_loop_interval = atoi(optarg);
 			break;
 		case OPT_fork:
 			if (!IS_START(ctx))
 				die("--fork option used for 'start' command only");
 			fork_process = true;
 			break;
+		case OPT_tsc2nsec:
+			ret = get_tsc_nsec(&ctx->tsc2nsec.shift,
+					   &ctx->tsc2nsec.mult);
+			if (ret)
+				die("TSC to nanosecond is not supported");
+			ctx->instance->flags |= BUFFER_FL_TSC2NSEC;
+			break;
+		case OPT_poll:
+			cmd_check_die(ctx, CMD_set, *(argv+1), "--poll");
+			recorder_flags |= TRACECMD_RECORD_POLL;
+			break;
+		case OPT_compression:
+			cmd_check_die(ctx, CMD_start, *(argv+1), "--compression");
+			cmd_check_die(ctx, CMD_set, *(argv+1), "--compression");
+			cmd_check_die(ctx, CMD_extract, *(argv+1), "--compression");
+			cmd_check_die(ctx, CMD_stream, *(argv+1), "--compression");
+			cmd_check_die(ctx, CMD_profile, *(argv+1), "--compression");
+			if (strcmp(optarg, "any") && strcmp(optarg, "none") &&
+			    !tracecmd_compress_is_supported(optarg, NULL))
+				die("Compression algorithm  %s is not supported", optarg);
+			ctx->compression = strdup(optarg);
+			break;
+		case OPT_file_ver:
+			if (ctx->curr_cmd != CMD_record && ctx->curr_cmd != CMD_record_agent)
+				die("--file_version has no effect with the command %s\n",
+				    *(argv+1));
+			ctx->file_version = atoi(optarg);
+			if (ctx->file_version < FILE_VERSION_MIN ||
+			    ctx->file_version > FILE_VERSION_MAX)
+				die("Unsupported file version %d, "
+				    "supported versions are from %d to %d",
+				    ctx->file_version, FILE_VERSION_MIN, FILE_VERSION_MAX);
+			break;
 		case OPT_quiet:
 		case 'q':
 			quiet = true;
+			break;
+		case OPT_verbose:
+			if (trace_set_verbose(optarg) < 0)
+				die("invalid verbose level %s", optarg);
 			break;
 		default:
 			usage(argv);
@@ -6147,26 +6712,6 @@ static void parse_record_options(int argc,
 		for_all_instances(instance) {
 			if (is_guest(instance))
 				add_argv(instance, "--date", true);
-		}
-	}
-	if (guest_sync_set) {
-	/* If -C is specified, prepend clock to all guest VM flags */
-		for_all_instances(instance) {
-			if (top_instance.clock) {
-				if (is_guest(instance) &&
-				    !(instance->flags & BUFFER_FL_HAS_CLOCK)) {
-					add_argv(instance,
-						 (char *)top_instance.clock,
-						 true);
-					add_argv(instance, "-C", true);
-					if (!instance->clock) {
-						instance->clock = strdup((char *)top_instance.clock);
-						if (!instance->clock)
-							die("Could not allocate instance clock");
-					}
-				}
-			}
-			instance->tsync_loop_interval = top_instance.tsync_loop_interval;
 		}
 	}
 
@@ -6276,10 +6821,69 @@ static bool has_local_instances(void)
 	return false;
 }
 
-/*
- * This function contains common code for the following commands:
- * record, start, stream, profile.
- */
+static void set_tsync_params(struct common_record_context *ctx)
+{
+	struct buffer_instance *instance;
+	int shift, mult;
+	bool force_tsc = false;
+	char *clock = NULL;
+
+	if (!ctx->clock) {
+	/*
+	 * If no clock is configured &&
+	 * KVM time sync protocol is available &&
+	 * there is information of each guest PID process &&
+	 * tsc-x86 clock is supported &&
+	 * TSC to nsec multiplier and shift are available:
+	 * force using the x86-tsc clock for this host-guest tracing session
+	 * and store TSC to nsec multiplier and shift.
+	 */
+		if (tsync_proto_is_supported("kvm") &&
+		    trace_have_guests_pid() &&
+		    clock_is_supported(NULL, TSC_CLOCK) &&
+		    !get_tsc_nsec(&shift, &mult) && mult) {
+			clock = strdup(TSC_CLOCK);
+			if (!clock)
+				die("Cannot not allocate clock");
+			ctx->tsc2nsec.mult = mult;
+			ctx->tsc2nsec.shift = shift;
+			force_tsc = true;
+		} else { /* Use the current clock of the first host instance */
+			clock = get_trace_clock(true);
+		}
+	} else {
+		clock = strdup(ctx->clock);
+		if (!clock)
+			die("Cannot not allocate clock");
+	}
+
+	if (!clock && !ctx->tsync_loop_interval)
+		goto out;
+	for_all_instances(instance) {
+		if (clock && !(instance->flags & BUFFER_FL_HAS_CLOCK)) {
+			/* use the same clock in all tracing peers */
+			if (is_guest(instance)) {
+				if (!instance->clock) {
+					instance->clock = strdup(clock);
+					if (!instance->clock)
+						die("Can not allocate instance clock");
+				}
+				add_argv(instance, (char *)instance->clock, true);
+				add_argv(instance, "-C", true);
+				if (ctx->tsc2nsec.mult)
+					instance->flags |= BUFFER_FL_TSC2NSEC;
+			} else if (force_tsc && !instance->clock) {
+				instance->clock = strdup(clock);
+				if (!instance->clock)
+					die("Can not allocate instance clock");
+			}
+		}
+		instance->tsync_loop_interval = ctx->tsync_loop_interval;
+	}
+out:
+	free(clock);
+}
+
 static void record_trace(int argc, char **argv,
 			 struct common_record_context *ctx)
 {
@@ -6305,6 +6909,9 @@ static void record_trace(int argc, char **argv,
 	if (!ctx->output)
 		ctx->output = DEFAULT_INPUT_FILE;
 
+	if (ctx->data_flags & DATA_FL_GUEST)
+		set_tsync_params(ctx);
+
 	make_instances();
 
 	/* Save the state of tracing_on before starting */
@@ -6327,12 +6934,13 @@ static void record_trace(int argc, char **argv,
 	page_size = getpagesize();
 
 	if (!is_guest(ctx->instance))
-		fset = set_ftrace(!ctx->disable, ctx->total_disable);
+		fset = set_ftrace(ctx->instance, !ctx->disable, ctx->total_disable);
 	if (!IS_CMDSET(ctx))
 		tracecmd_disable_all_tracing(1);
 
 	for_all_instances(instance)
-		set_clock(instance);
+		set_clock(ctx, instance);
+
 
 	/* Record records the date first */
 	if (ctx->date &&
@@ -6414,7 +7022,7 @@ static void record_trace(int argc, char **argv,
 			trace_or_sleep(type, pwait);
 	}
 
-	tell_guests_to_stop();
+	tell_guests_to_stop(ctx);
 	tracecmd_disable_tracing();
 	if (!latency)
 		stop_threads(type);
@@ -6437,12 +7045,23 @@ static void record_trace(int argc, char **argv,
 	finalize_record_trace(ctx);
 }
 
+/*
+ * This function contains common code for the following commands:
+ * record, start, stream, profile.
+ */
+static void record_trace_command(int argc, char **argv,
+				 struct common_record_context *ctx)
+{
+	tracecmd_tsync_init();
+	record_trace(argc, argv, ctx);
+}
+
 void trace_start(int argc, char **argv)
 {
 	struct common_record_context ctx;
 
 	parse_record_options(argc, argv, CMD_start, &ctx);
-	record_trace(argc, argv, &ctx);
+	record_trace_command(argc, argv, &ctx);
 	exit(0);
 }
 
@@ -6451,7 +7070,7 @@ void trace_set(int argc, char **argv)
 	struct common_record_context ctx;
 
 	parse_record_options(argc, argv, CMD_set, &ctx);
-	record_trace(argc, argv, &ctx);
+	record_trace_command(argc, argv, &ctx);
 	exit(0);
 }
 
@@ -6534,7 +7153,7 @@ void trace_stream(int argc, char **argv)
 	struct common_record_context ctx;
 
 	parse_record_options(argc, argv, CMD_stream, &ctx);
-	record_trace(argc, argv, &ctx);
+	record_trace_command(argc, argv, &ctx);
 	exit(0);
 }
 
@@ -6553,7 +7172,7 @@ void trace_profile(int argc, char **argv)
 	if (!buffer_instances)
 		top_instance.flags |= BUFFER_FL_PROFILE;
 
-	record_trace(argc, argv, &ctx);
+	record_trace_command(argc, argv, &ctx);
 	do_trace_profile();
 	exit(0);
 }
@@ -6563,7 +7182,7 @@ void trace_record(int argc, char **argv)
 	struct common_record_context ctx;
 
 	parse_record_options(argc, argv, CMD_record, &ctx);
-	record_trace(argc, argv, &ctx);
+	record_trace_command(argc, argv, &ctx);
 	exit(0);
 }
 

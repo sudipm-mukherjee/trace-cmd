@@ -22,6 +22,29 @@
 
 #include "trace-local.h"
 
+static struct tracecmd_output *create_output(const char *file,
+					     const char *tracing_dir, const char *kallsyms)
+{
+	struct tracecmd_output *out;
+
+	out = tracecmd_output_create(file);
+	if (!out)
+		goto error;
+
+	if (tracing_dir && tracecmd_output_set_trace_dir(out, tracing_dir))
+		goto error;
+	if (kallsyms && tracecmd_output_set_kallsyms(out, kallsyms))
+		goto error;
+	if (tracecmd_output_write_headers(out, NULL))
+		goto error;
+	return out;
+error:
+	if (out)
+		tracecmd_output_close(out);
+	unlink(file);
+	return NULL;
+}
+
 void trace_restore (int argc, char **argv)
 {
 	struct tracecmd_output *handle;
@@ -90,8 +113,7 @@ void trace_restore (int argc, char **argv)
 			usage(argv);
 		}
 
-		handle = tracecmd_create_init_file_override(output, tracing_dir,
-							    kallsyms);
+		handle = create_output(output, tracing_dir, kallsyms);
 		if (!handle)
 			die("Unabled to create output file %s", output);
 		if (tracecmd_write_cmdlines(handle) < 0)
@@ -125,10 +147,12 @@ void trace_restore (int argc, char **argv)
 		if (tracecmd_read_headers(ihandle, TRACECMD_FILE_CMD_LINES) < 0)
 			die("error reading file %s headers", input);
 
-		handle = tracecmd_copy(ihandle, output);
+		handle = tracecmd_copy(ihandle, output, TRACECMD_FILE_CMD_LINES, 0, NULL);
 		tracecmd_close(ihandle);
-	} else
-		handle = tracecmd_create_init_file(output);
+	} else {
+		handle = tracecmd_output_create(output);
+		tracecmd_output_write_headers(handle, NULL);
+	}
 
 	if (!handle)
 		die("error writing to %s", output);

@@ -27,12 +27,19 @@ typedef unsigned long long u64;
 
 struct buffer_instance;
 
+#define __printf(a, b) __attribute__((format(printf,a,b)))
+
+__printf(1,2)
+void warning(const char *fmt, ...);
+
 /* for local shared information with trace-cmd executable */
 
 void usage(char **argv);
 
 extern int silence_warnings;
 extern int show_status;
+
+int trace_set_verbose(char *level);
 
 struct pid_record_data {
 	int			pid;
@@ -103,6 +110,8 @@ void trace_usage(int argc, char **argv);
 
 void trace_dump(int argc, char **argv);
 
+void trace_convert(int argc, char **argv);
+
 int trace_record_agent(struct tracecmd_msg_handle *msg_handle,
 		       int cpus, int *fds,
 		       int argc, char **argv, bool use_fifos,
@@ -172,6 +181,7 @@ enum buffer_instance_flags {
 	BUFFER_FL_GUEST		= 1 << 2,
 	BUFFER_FL_AGENT		= 1 << 3,
 	BUFFER_FL_HAS_CLOCK	= 1 << 4,
+	BUFFER_FL_TSC2NSEC	= 1 << 5,
 };
 
 struct func_list {
@@ -197,6 +207,12 @@ struct filter_pids {
 	struct filter_pids *next;
 	int pid;
 	int exclude;
+};
+
+struct tsc_nsec {
+	int mult;
+	int shift;
+	unsigned long long offset;
 };
 
 struct buffer_instance {
@@ -284,16 +300,19 @@ void add_instance(struct buffer_instance *instance, int cpu_count);
 void update_first_instance(struct buffer_instance *instance, int topt);
 
 void show_instance_file(struct buffer_instance *instance, const char *name);
+void show_options(const char *prefix, struct buffer_instance *buffer);
 
 struct trace_guest {
+	struct tracefs_instance *instance;
 	char *name;
 	int cid;
 	int pid;
 	int cpu_max;
 	int *cpu_pid;
+	int *task_pids;
 };
-struct trace_guest *get_guest_by_cid(unsigned int guest_cid);
-struct trace_guest *get_guest_by_name(char *name);
+struct trace_guest *trace_get_guest(unsigned int cid, const char *name);
+bool trace_have_guests_pid(void);
 void read_qemu_guests(void);
 int get_guest_pid(unsigned int guest_cid);
 int get_guest_vcpu_pid(unsigned int guest_cid, unsigned int guest_vcpu);
@@ -321,8 +340,10 @@ int trace_open_vsock(unsigned int cid, unsigned int port);
 char *trace_get_guest_file(const char *file, const char *guest);
 
 /* No longer in event-utils.h */
+__printf(1,2)
 void __noreturn die(const char *fmt, ...); /* Can be overriden */
 void *malloc_or_die(unsigned int size); /* Can be overridden */
+__printf(1,2)
 void __noreturn __die(const char *fmt, ...);
 void __noreturn _vdie(const char *fmt, va_list ap);
 
@@ -333,5 +354,7 @@ static inline bool is_digits(const char *s)
 			return false;
 	return true;
 }
+
+bool trace_tsc2nsec_is_supported(void);
 
 #endif /* __TRACE_LOCAL_H */

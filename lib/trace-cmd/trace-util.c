@@ -20,15 +20,17 @@
 #include <sys/stat.h>
 #include <sys/sysinfo.h>
 #include <time.h>
+#include <event-parse.h>
+#include <event-utils.h>
 
+#include "trace-cmd-private.h"
 #include "trace-cmd-local.h"
-#include "event-utils.h"
 
 #define LOCAL_PLUGIN_DIR ".trace-cmd/plugins"
 #define PROC_STACK_FILE "/proc/sys/kernel/stack_tracer_enabled"
 
 static bool debug;
-
+static int log_level = TEP_LOG_INFO;
 static FILE *logfp;
 
 const static struct {
@@ -91,6 +93,11 @@ const char *tracecmd_clock_id2str(enum tracecmd_clocks clock)
 void tracecmd_set_debug(bool set_debug)
 {
 	debug = set_debug;
+
+	if (set_debug)
+		tracecmd_set_loglevel(TEP_LOG_DEBUG);
+	else
+		tracecmd_set_loglevel(TEP_LOG_CRITICAL);
 }
 
 /**
@@ -124,6 +131,7 @@ void tracecmd_parse_proc_kallsyms(struct tep_handle *pevent,
 			 char *file, unsigned int size __maybe_unused)
 {
 	unsigned long long addr;
+	int sav_errno;
 	char *func;
 	char *line;
 	char *next = NULL;
@@ -137,13 +145,13 @@ void tracecmd_parse_proc_kallsyms(struct tep_handle *pevent,
 		int n;
 
 		mod = NULL;
+		sav_errno = errno;
 		errno = 0;
 		n = sscanf(line, "%16llx %c %n%*s%n%*1[\t][%n%*s%n",
 			   &addr, &ch, &func_start, &func_end, &mod_start, &mod_end);
-		if (errno) {
-			perror("sscanf");
+		if (errno)
 			return;
-		}
+		errno = sav_errno;
 
 		if (n != 2 || !func_end)
 			return;
@@ -182,7 +190,7 @@ void tracecmd_parse_ftrace_printk(struct tep_handle *pevent,
 	while (line) {
 		addr_str = strtok_r(line, ":", &fmt);
 		if (!addr_str) {
-			warning("printk format with empty entry");
+			tracecmd_warning("printk format with empty entry");
 			break;
 		}
 		addr = strtoull(addr_str, NULL, 16);
@@ -277,7 +285,7 @@ static void add_plugin_file(struct tep_handle *pevent, const char *path,
  *
  * Use trace_util_free_plugin_files() to free the result.
  */
-char **trace_util_find_plugin_files(const char *suffix)
+__hidden char **trace_util_find_plugin_files(const char *suffix)
 {
 	struct add_plugin_data pdata;
 
@@ -297,7 +305,7 @@ char **trace_util_find_plugin_files(const char *suffix)
  *
  * Frees the contents that were allocated by trace_util_find_plugin_files().
  */
-void trace_util_free_plugin_files(char **files)
+void __hidden trace_util_free_plugin_files(char **files)
 {
 	int i;
 
@@ -332,7 +340,7 @@ static char *get_source_plugins_dir(void)
 	return strdup(path);
 }
 
-struct tep_plugin_list*
+__hidden struct tep_plugin_list *
 trace_load_plugins(struct tep_handle *tep, int flags)
 {
 	struct tep_plugin_list *list;
@@ -353,48 +361,58 @@ trace_load_plugins(struct tep_handle *tep, int flags)
 	return list;
 }
 
-void __noreturn __vdie(const char *fmt, va_list ap)
+/**
+ * tracecmd_set_loglevel - set log level of the library
+ * @level: desired level of the library messages
+ */
+void tracecmd_set_loglevel(enum tep_loglevel level)
 {
-	int ret = errno;
-
-	if (errno)
-		perror("trace-cmd");
-	else
-		ret = -1;
-
-	fprintf(stderr, "  ");
-	vfprintf(stderr, fmt, ap);
-
-	fprintf(stderr, "\n");
-	exit(ret);
+	log_level = level;
+	tracefs_set_loglevel(level);
+	tep_set_loglevel(level);
 }
 
-void __noreturn __die(const char *fmt, ...)
+void __weak tracecmd_warning(const char *fmt, ...)
 {
 	va_list ap;
 
+	if (log_level < TEP_LOG_WARNING)
+		return;
+
 	va_start(ap, fmt);
-	__vdie(fmt, ap);
+	tep_vprint("libtracecmd", TEP_LOG_WARNING, true, fmt, ap);
 	va_end(ap);
 }
 
-void __weak __noreturn die(const char *fmt, ...)
+void __weak tracecmd_info(const char *fmt, ...)
 {
 	va_list ap;
 
+	if (log_level < TEP_LOG_INFO)
+		return;
+
 	va_start(ap, fmt);
-	__vdie(fmt, ap);
+	tep_vprint("libtracecmd", TEP_LOG_INFO, false, fmt, ap);
 	va_end(ap);
 }
 
-void __weak *malloc_or_die(unsigned int size)
+void __weak tracecmd_critical(const char *fmt, ...)
 {
-	void *data;
+	int ret;
+	va_list ap;
 
-	data = malloc(size);
-	if (!data)
-		die("malloc");
-	return data;
+	if (log_level < TEP_LOG_CRITICAL)
+		return;
+
+	va_start(ap, fmt);
+	ret = tep_vprint("libtracecmd", TEP_LOG_CRITICAL, true, fmt, ap);
+	va_end(ap);
+
+	if (debug) {
+		if (!ret)
+			ret = -1;
+		exit(ret);
+	}
 }
 
 #define LOG_BUF_SIZE 1024
@@ -504,7 +522,6 @@ int tracecmd_stack_tracer_status(int *status)
 
 	buf[n] = 0;
 
-	errno = 0;
 	num = strtol(buf, NULL, 10);
 
 	/* Check for various possible errors */
@@ -537,7 +554,7 @@ int tracecmd_count_cpus(void)
 
 	if (!once) {
 		once++;
-		warning("sysconf could not determine number of CPUS");
+		tracecmd_warning("sysconf could not determine number of CPUS");
 	}
 
 	/* Do the hack to figure out # of CPUS */
@@ -546,8 +563,10 @@ int tracecmd_count_cpus(void)
 	pbuf = buf;
 
 	fp = fopen("/proc/cpuinfo", "r");
-	if (!fp)
-		die("Can not read cpuinfo");
+	if (!fp) {
+		tracecmd_critical("Can not read cpuinfo");
+		return 0;
+	}
 
 	while ((r = getline(&pbuf, pn, fp)) >= 0) {
 		char *p;
@@ -599,9 +618,63 @@ unsigned long long tracecmd_generate_traceid(void)
 	return hash;
 }
 
+/*
+ * tracecmd_default_file_version - Get default trace file version of the library
+ *
+ * Returns the default trace file version
+ */
+int tracecmd_default_file_version(void)
+{
+	return FILE_VERSION_DEFAULT;
+}
+
 bool tracecmd_is_version_supported(unsigned int version)
 {
-	if (version <= FILE_VERSION)
+	if (version <= FILE_VERSION_MAX)
 		return true;
+	return false;
+}
+
+static void __attribute__ ((constructor)) tracecmd_lib_init(void)
+{
+	tracecmd_compress_init();
+}
+
+static void __attribute__((destructor)) tracecmd_lib_free(void)
+{
+	tracecmd_compress_free();
+}
+
+__hidden bool check_file_state(unsigned long file_version, int current_state, int new_state)
+{
+	if (file_version >= FILE_VERSION_SECTIONS) {
+		if (current_state < TRACECMD_FILE_INIT)
+			return false;
+
+		return true;
+	}
+
+	switch (new_state) {
+	case TRACECMD_FILE_HEADERS:
+	case TRACECMD_FILE_FTRACE_EVENTS:
+	case TRACECMD_FILE_ALL_EVENTS:
+	case TRACECMD_FILE_KALLSYMS:
+	case TRACECMD_FILE_PRINTK:
+	case TRACECMD_FILE_CMD_LINES:
+	case TRACECMD_FILE_CPU_COUNT:
+		if (current_state == (new_state - 1))
+			return true;
+		break;
+	case TRACECMD_FILE_OPTIONS:
+		if (file_version < FILE_VERSION_SECTIONS && current_state == TRACECMD_FILE_CPU_COUNT)
+			return true;
+		break;
+	case TRACECMD_FILE_CPU_LATENCY:
+	case TRACECMD_FILE_CPU_FLYRECORD:
+		if (current_state == TRACECMD_FILE_OPTIONS)
+			return true;
+		break;
+	}
+
 	return false;
 }

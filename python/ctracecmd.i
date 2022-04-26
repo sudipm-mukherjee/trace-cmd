@@ -44,17 +44,6 @@ static void py_supress_trace_output(void)
 	skip_output = 1;
 }
 
-void pr_info(const char *fmt, ...)
-{
-        va_list ap;
-
-	if (skip_output)
-		return;
-	va_start(ap, fmt);
-	__vpr_info(fmt, ap);
-	va_end(ap);
-}
-
 void warning(const char *fmt, ...)
 {
 	va_list ap;
@@ -63,7 +52,7 @@ void warning(const char *fmt, ...)
 		return;
 
 	va_start(ap, fmt);
-	__vwarning(fmt, ap);
+	tep_vprint("tracecmd", TEP_LOG_WARNING, true, fmt, ap);
 	va_end(ap);
 }
 
@@ -249,7 +238,7 @@ static int python_callback(struct trace_seq *s,
 
 
 %ignore trace_seq_vprintf;
-%ignore vpr_info;
+%ignore vpr_stat;
 
 /* SWIG can't grok these, define them to nothing */
 #define __trace
@@ -257,5 +246,5 @@ static int python_callback(struct trace_seq *s,
 #define __thread
 
 %include "trace-cmd.h"
-%include "trace-seq.h"
-%include "event-parse.h"
+%include <trace-seq.h>
+%include <event-parse.h>

@@ -14,6 +14,7 @@
 
 #include "tracefs.h"
 #include "trace-cmd-private.h"
+#include "trace-cmd-local.h"
 #include "event-utils.h"
 
 /* F_GETPIPE_SZ was introduced in 2.6.35, older systems don't have it */
@@ -111,6 +112,18 @@ void tracecmd_free_recorder(struct tracecmd_recorder *recorder)
 	free(recorder);
 }
 
+static void set_nonblock(struct tracecmd_recorder *recorder)
+{
+	long flags;
+
+	/* Do not block on reads */
+	flags = fcntl(recorder->trace_fd, F_GETFL);
+	fcntl(recorder->trace_fd, F_SETFL, flags | O_NONBLOCK);
+
+	/* Do not block on streams */
+	recorder->fd_flags |= SPLICE_F_NONBLOCK;
+}
+
 struct tracecmd_recorder *
 tracecmd_create_buffer_recorder_fd2(int fd, int fd2, int cpu, unsigned flags,
 				    const char *buffer, int maxkb)
@@ -129,7 +142,7 @@ tracecmd_create_buffer_recorder_fd2(int fd, int fd2, int cpu, unsigned flags,
 
 	recorder->fd_flags = SPLICE_F_MOVE;
 
-	if (!(recorder->flags & TRACECMD_RECORD_BLOCK))
+	if (!(recorder->flags & TRACECMD_RECORD_BLOCK_SPLICE))
 		recorder->fd_flags |= SPLICE_F_NONBLOCK;
 
 	recorder->trace_fd_flags = SPLICE_F_MOVE;
@@ -196,6 +209,9 @@ tracecmd_create_buffer_recorder_fd2(int fd, int fd2, int cpu, unsigned flags,
 
 		recorder->pipe_size = pipe_size;
 	}
+
+	if (recorder->flags & TRACECMD_RECORD_POLL)
+		set_nonblock(recorder);
 
 	return recorder;
 
@@ -393,7 +409,7 @@ static long splice_data(struct tracecmd_recorder *recorder)
 		if (errno == EAGAIN || errno == EINTR || errno == ENOTCONN)
 			return 0;
 
-		warning("recorder error in splice input");
+		tracecmd_warning("recorder error in splice input");
 		return -1;
 	} else if (read == 0)
 		return 0;
@@ -403,7 +419,7 @@ static long splice_data(struct tracecmd_recorder *recorder)
 		     read, recorder->fd_flags);
 	if (ret < 0) {
 		if (errno != EAGAIN && errno != EINTR) {
-			warning("recorder error in splice output");
+			tracecmd_warning("recorder error in splice output");
 			return -1;
 		}
 		return total_read;
@@ -451,7 +467,7 @@ static long direct_splice_data(struct tracecmd_recorder *recorder)
 		if (errno == EAGAIN || errno == EINTR || errno == ENOTCONN)
 			return 0;
 
-		warning("recorder error in splice input");
+		tracecmd_warning("recorder error in splice input");
 		return -1;
 	}
 
@@ -473,7 +489,7 @@ static long read_data(struct tracecmd_recorder *recorder)
 		if (errno == EAGAIN || errno == EINTR || errno == ENOTCONN)
 			return 0;
 
-		warning("recorder error in read input");
+		tracecmd_warning("recorder error in read input");
 		return -1;
 	}
 
@@ -501,18 +517,6 @@ static long move_data(struct tracecmd_recorder *recorder)
 		return direct_splice_data(recorder);
 
 	return splice_data(recorder);
-}
-
-static void set_nonblock(struct tracecmd_recorder *recorder)
-{
-	long flags;
-
-	/* Do not block on reads for flushing */
-	flags = fcntl(recorder->trace_fd, F_GETFL);
-	fcntl(recorder->trace_fd, F_SETFL, flags | O_NONBLOCK);
-
-	/* Do not block on streams for write */
-	recorder->fd_flags |= SPLICE_F_NONBLOCK;
 }
 
 long tracecmd_flush_recording(struct tracecmd_recorder *recorder)

@@ -134,10 +134,11 @@ OPTIONS
 *-l* 'function-name'::
     This will limit the 'function' and 'function_graph' tracers to only trace
     the given function name. More than one *-l* may be specified on the
-    command line to trace more than one function. The limited use of glob
-    expressions are also allowed. These are 'match\*' to only filter functions
-    that start with 'match'. '\*match' to only filter functions that end with
-    'match'. '\*match\*' to only filter on functions that contain 'match'.
+    command line to trace more than one function. This supports both full
+    regex(3) parsing, or basic glob parsing. If the filter has only alphanumeric,
+    '_', '*', '?' and '.' characters, then it will be parsed as a basic glob.
+    to force it to be a regex, prefix the filter with '^' or append it with '$'
+    and it will then be parsed as a regex.
 
 *-g* 'function-name'::
     This option is for the function_graph plugin. It will graph the given
@@ -349,10 +350,50 @@ OPTIONS
         at the beginning and at the end of the trace.
         Timestamps synchronization with guests works only if there is support for VSOCK.\n"
 
+*--tsc2nsec*::
+    Convert the current clock to nanoseconds, using tsc multiplier and shift from the Linux
+        kernel's perf interface. This option does not change the trace clock, just assumes that
+        the tsc multiplier and shift are applicable for the selected clock. You may use the
+        "-C tsc2nsec" clock, if not sure what clock to select.
 *--stderr*::
     Have output go to stderr instead of stdout, but the output of the command
     executed will not be changed. This is useful if you want to monitor the
     output of the command being executed, but not see the output from trace-cmd.
+
+*--poll*::
+    Waiting for data to be available on the trace ring-buffers may trigger
+    IPIs. This might generate unacceptable trace noise when tracing low latency
+    or real time systems. The poll option forces trace-cmd to use O_NONBLOCK.
+    Traces are extracted by busy waiting, which will hog the CPUs, so only use
+    when really needed.
+
+*--name*::
+    Give a specific name for the current agent being processed. Used after *-A* to
+    give the guest being traced a name. Useful when using the vsocket ID instead of
+    a name of the guest.
+
+*--verbose*[='level']::
+     Set the log level. Supported log levels are "none", "critical", "error", "warning",
+     "info", "debug", "all" or their identifiers "0", "1", "2", "3", "4", "5", "6". Setting the log
+     level to specific value enables all logs from that and all previous levels.
+     The level will default to "info" if one is not specified.
+
+     Example: enable all critical, error and warning logs
+
+      trace-cmd record --verbose=warning
+
+*--file-version*::
+    Desired version of the output file. Supported versions are 6 or 7.
+
+*--compression*::
+    Compression of the trace output file, one of these strings can be passed:
+
+    'any'  - auto select the best available compression algorithm
+
+    'none' - do not compress the trace file
+
+    'name' - the name of the desired compression algorithms. Available algorithms can be listed with
+    trace-cmd list -c
 
 EXAMPLES
 --------

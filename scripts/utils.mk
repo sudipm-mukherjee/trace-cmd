@@ -72,7 +72,7 @@ do_build_static_lib =				\
 
 do_compile_shared_library =			\
 	($(print_shared_lib_compile)		\
-	$(CC) --shared $^ '-Wl,-soname,$(@F),-rpath=$$ORIGIN' -o $@ $(LIBS))
+	$(CC) --shared $^ '-Wl,-soname,$(1),-rpath=$$ORIGIN' -o $@ $(LDFLAGS) $(LIBS))
 
 do_compile_plugin_obj =				\
 	($(print_plugin_obj_compile)		\
@@ -173,16 +173,6 @@ define do_make_pkgconfig_file
 	sed -i "s|HEADER_DIR|$(includedir)/trace-cmd|g" ${PKG_CONFIG_FILE};
 endef
 
-define manpage.xsl
-	if [ -z ${MANPAGE_DOCBOOK_XSL} ]; then 			\
-		echo "*********************************";	\
-		echo "** No docbook.xsl is installed **";	\
-		echo "** Can't make man pages        **";	\
-		echo "*********************************";	\
-		exit 1;						\
-	fi
-endef
-
 do_asciidoc_build =				\
 	($(print_asciidoc)			\
 	 asciidoc -d manpage -b docbook -o $@ $<)
@@ -206,3 +196,15 @@ define do_install_docs
 	fi;						\
 	$(INSTALL) -m 644 $1 '$(DESTDIR_SQ)$2'
 endef
+
+ifneq ($(findstring $(MAKEFLAGS),s),s)
+ifneq ($(V),1)
+	QUIET_ASCIIDOC	= @echo '  ASCIIDOC  '$@;
+	QUIET_XMLTO	= @echo '  XMLTO    '$@;
+	QUIET_SUBDIR0	= +@subdir=
+	QUIET_SUBDIR1	= ;$(NO_SUBDIR) \
+			   echo '  SUBDIR   ' $$subdir; \
+			  $(MAKE) $(PRINT_DIR) -C $$subdir
+	export V
+endif
+endif

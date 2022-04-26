@@ -44,6 +44,7 @@ enum {
 	SHOW_EVENT_FORMAT		= 1 << 0,
 	SHOW_EVENT_FILTER		= 1 << 1,
 	SHOW_EVENT_TRIGGER		= 1 << 2,
+	SHOW_EVENT_FULL			= 1 << 3,
 };
 
 
@@ -56,10 +57,10 @@ void show_file(const char *name)
 	tracefs_put_tracing_file(path);
 }
 
-typedef int (*process_file_func)(char *buf, int len);
+typedef int (*process_file_func)(char *buf, int len, int flags);
 
 static void process_file_re(process_file_func func,
-			    const char *name, const char *re)
+			    const char *name, const char *re, int flags)
 {
 	regex_t reg;
 	char *path;
@@ -97,7 +98,7 @@ static void process_file_re(process_file_func func,
 	do {
 		n = getline(&buf, &l, fp);
 		if (n > 0 && regexec(&reg, buf, 0, NULL, 0) == 0)
-			func(buf, n);
+			func(buf, n, flags);
 	} while (n > 0);
 	free(buf);
 	fclose(fp);
@@ -105,14 +106,144 @@ static void process_file_re(process_file_func func,
 	regfree(&reg);
 }
 
-static int show_file_write(char *buf, int len)
+static void show_event(process_file_func func, const char *system,
+		       const char *event, int flags)
+{
+	char *buf;
+	int ret;
+
+	ret = asprintf(&buf, "%s:%s", system, event);
+	if (ret < 0)
+		die("Can not allocate event");
+	func(buf, strlen(buf), flags);
+	free(buf);
+}
+
+static void show_system(process_file_func func, const char *system, int flags)
+{
+	char **events;
+	int e;
+
+	events = tracefs_system_events(NULL, system);
+	if (!events) /* die? */
+		return;
+
+	for (e = 0; events[e]; e++)
+		show_event(func, system, events[e], flags);
+}
+
+static void show_event_systems(process_file_func func, char **systems, int flags)
+{
+	int s;
+
+	for (s = 0; systems[s]; s++)
+		show_system(func, systems[s], flags);
+}
+
+static void match_system_events(process_file_func func, const char *system,
+				regex_t *reg, int flags)
+{
+	char **events;
+	int e;
+
+	events = tracefs_system_events(NULL, system);
+	if (!events) /* die? */
+		return;
+	for (e = 0; events[e]; e++) {
+		if (regexec(reg, events[e], 0, NULL, 0) == 0)
+			show_event(func, system, events[e], flags);
+	}
+	tracefs_list_free(events);
+}
+
+static void process_events(process_file_func func, const char *re, int flags)
+{
+	const char *ftrace = "ftrace";
+	regex_t system_reg;
+	regex_t event_reg;
+	char *str;
+	size_t l = strlen(re);
+	bool just_systems = true;
+	char **systems;
+	char *system;
+	char *event;
+	int s;
+
+	systems = tracefs_event_systems(NULL);
+	if (!systems)
+		return process_file_re(func, "available_events", re, flags);
+
+	if (!re || l == 0) {
+		show_event_systems(func, systems, flags);
+		return;
+	}
+
+	str = strdup(re);
+	if (!str)
+		die("Can not allocate momory for regex");
+
+	system = strtok(str, ":");
+	event = strtok(NULL, "");
+
+	if (regcomp(&system_reg, system, REG_ICASE|REG_NOSUB))
+		die("invalid regex '%s'", system);
+
+	if (event) {
+		if (regcomp(&event_reg, event, REG_ICASE|REG_NOSUB))
+			die("invalid regex '%s'", event);
+	} else {
+		/*
+		 * If the regex ends with ":", then event would be null,
+		 * but we do not want to match events.
+		 */
+		if (re[l-1] != ':')
+			just_systems = false;
+	}
+	free(str);
+
+	/*
+	 * See if this matches the special ftrace system, as ftrace is not included
+	 * in the systems list, but can get events from tracefs_system_events().
+	 */
+	if (regexec(&system_reg, ftrace, 0, NULL, 0) == 0) {
+		if (!event)
+			show_system(func, ftrace, flags);
+		else
+			match_system_events(func, ftrace, &event_reg, flags);
+	} else if (!just_systems) {
+		match_system_events(func, ftrace, &system_reg, flags);
+	}
+
+	for (s = 0; systems[s]; s++) {
+
+		if (regexec(&system_reg, systems[s], 0, NULL, 0) == 0) {
+			if (!event) {
+				show_system(func, systems[s], flags);
+				continue;
+			}
+			match_system_events(func, systems[s], &event_reg, flags);
+			continue;
+		}
+		if (just_systems)
+			continue;
+
+		match_system_events(func, systems[s], &system_reg, flags);
+	}
+	tracefs_list_free(systems);
+
+	regfree(&system_reg);
+	if (event)
+		regfree(&event_reg);
+}
+
+static int show_file_write(char *buf, int len, int flags)
 {
 	return fwrite(buf, 1, len, stdout);
 }
 
 static void show_file_re(const char *name, const char *re)
 {
-	process_file_re(show_file_write, name, re);
+	process_file_re(show_file_write, name, re, 0);
 }
 
 static char *get_event_file(const char *type, char *buf, int len)
@@ -144,7 +275,7 @@ static char *get_event_file(const char *type, char *buf, int len)
 	return file;
 }
 
-static int event_filter_write(char *buf, int len)
+static int event_filter_write(char *buf, int len, int flags)
 {
 	char *file;
 
@@ -161,7 +292,7 @@ static int event_filter_write(char *buf, int len)
 	return 0;
 }
 
-static int event_trigger_write(char *buf, int len)
+static int event_trigger_write(char *buf, int len, int flags)
 {
 	char *file;
 
@@ -178,13 +309,16 @@ static int event_trigger_write(char *buf, int len)
 	return 0;
 }
 
-static int event_format_write(char *fbuf, int len)
+static int event_format_write(char *fbuf, int len, int flags)
 {
 	char *file = get_event_file("format", fbuf, len);
 	char *buf = NULL;
 	size_t l;
 	FILE *fp;
+	bool full;
 	int n;
+
+	full = flags & SHOW_EVENT_FULL;
 
 	/* The get_event_file() crops system in fbuf */
 	printf("system: %s\n", fbuf);
@@ -198,7 +332,7 @@ static int event_format_write(char *fbuf, int len)
 	do {
 		n = getline(&buf, &l, fp);
 		if (n > 0) {
-			if (strncmp(buf, "print fmt", 9) == 0)
+			if (!full && strncmp(buf, "print fmt", 9) == 0)
 				break;
 			fwrite(buf, 1, n, stdout);
 		}
@@ -210,24 +344,34 @@ static int event_format_write(char *fbuf, int len)
 	return 0;
 }
 
+static int event_name(char *buf, int len, int flags)
+{
+	printf("%s\n", buf);
+
+	return 0;
+}
 
 static void show_event_filter_re(const char *re)
 {
-	process_file_re(event_filter_write, "available_events", re);
+	process_events(event_filter_write, re, 0);
 }
 
 
 static void show_event_trigger_re(const char *re)
 {
-	process_file_re(event_trigger_write, "available_events", re);
+	process_events(event_trigger_write, re, 0);
 }
 
 
-static void show_event_format_re(const char *re)
+static void show_event_format_re(const char *re, int flags)
 {
-	process_file_re(event_format_write, "available_events", re);
+	process_events(event_format_write, re, flags);
 }
 
+static void show_event_names_re(const char *re)
+{
+	process_events(event_name, re, 0);
+}
 
 static void show_events(const char *eventre, int flags)
 {
@@ -236,7 +380,7 @@ static void show_events(const char *eventre, int flags)
 
 	if (eventre) {
 		if (flags & SHOW_EVENT_FORMAT)
-			show_event_format_re(eventre);
+			show_event_format_re(eventre, flags);
 
 		else if (flags & SHOW_EVENT_FILTER)
 			show_event_filter_re(eventre);
@@ -244,7 +388,7 @@ static void show_events(const char *eventre, int flags)
 		else if (flags & SHOW_EVENT_TRIGGER)
 			show_event_trigger_re(eventre);
 		else
-			show_file_re("available_events", eventre);
+			show_event_names_re(eventre);
 	} else
 		show_file("available_events");
 }
@@ -255,16 +399,78 @@ static void show_tracers(void)
 	show_file("available_tracers");
 }
 
-
-static void show_options(void)
+void show_options(const char *prefix, struct buffer_instance *buffer)
 {
+	struct tracefs_instance *instance = buffer ? buffer->tracefs : NULL;
+	struct dirent *dent;
+	struct stat st;
+	char *path;
+	DIR *dir;
+
+	if (!prefix)
+		prefix = "";
+
+	path = tracefs_instance_get_file(instance, "options");
+	if (!path)
+		goto show_file;
+	if (stat(path, &st) < 0)
+		goto show_file;
+
+	if ((st.st_mode & S_IFMT) != S_IFDIR)
+		goto show_file;
+
+	dir = opendir(path);
+	if (!dir)
+		die("Can not read instance directory");
+
+	while ((dent = readdir(dir))) {
+		const char *name = dent->d_name;
+		long long val;
+		char *file;
+		int ret;
+
+		if (strcmp(name, ".") == 0 ||
+		    strcmp(name, "..") == 0)
+			continue;
+
+		ret = asprintf(&file, "options/%s", name);
+		if (ret < 0)
+			die("Failed to allocate file name");
+		ret = tracefs_instance_file_read_number(instance, file, &val);
+		if (!ret) {
+			if (val)
+				printf("%s%s\n", prefix, name);
+			else
+				printf("%sno%s\n", prefix, name);
+		}
+		free(file);
+	}
+	closedir(dir);
+	tracefs_put_tracing_file(path);
+	return;
+
+ show_file:
+	tracefs_put_tracing_file(path);
 	show_file("trace_options");
 }
 
-
 static void show_clocks(void)
 {
-	show_file("trace_clock");
+	char *clocks;
+	int size;
+
+	clocks = tracefs_instance_file_read(NULL, "trace_clock", &size);
+	if (!clocks)
+		die("getting clocks");
+	if (clocks[size - 1] == '\n')
+		clocks[size - 1] = 0;
+
+	if (trace_tsc2nsec_is_supported())
+		printf("%s %s\n", clocks, TSCNSEC_CLOCK);
+	else
+		printf("%s\n", clocks);
+
+	free(clocks);
 }
 
 
@@ -391,6 +597,23 @@ static void show_plugins(void)
 	tep_free(pevent);
 }
 
+static void show_compression(void)
+{
+	char **versions, **names;
+	int c, i;
+
+	c = tracecmd_compress_protos_get(&names, &versions);
+	if (c <= 0) {
+		printf("No compression algorithms are supported\n");
+		return;
+	}
+	printf("Supported compression algorithms:\n");
+	for (i = 0; i < c; i++)
+		printf("\t%s, %s\n", names[i], versions[i]);
+
+	free(names);
+	free(versions);
+}
 
 void trace_list(int argc, char **argv)
 {
@@ -405,6 +628,7 @@ void trace_list(int argc, char **argv)
 	int flags = 0;
 	int systems = 0;
 	int show_all = 1;
+	int compression = 0;
 	int i;
 	const char *arg;
 	const char *funcre = NULL;
@@ -469,9 +693,17 @@ void trace_list(int argc, char **argv)
 				systems = 1;
 				show_all = 0;
 				break;
+			case 'c':
+				compression = 1;
+				show_all = 0;
+				break;
 			case '-':
 				if (strcmp(argv[i], "--debug") == 0) {
 					tracecmd_set_debug(true);
+					break;
+				}
+				if (strcmp(argv[i], "--full") == 0) {
+					flags |= SHOW_EVENT_FULL;
 					break;
 				}
 				fprintf(stderr, "list: invalid option -- '%s'\n",
@@ -491,7 +723,7 @@ void trace_list(int argc, char **argv)
 		show_tracers();
 
 	if (options)
-		show_options();
+		show_options(NULL, NULL);
 
 	if (plug)
 		show_plugins();
@@ -509,6 +741,8 @@ void trace_list(int argc, char **argv)
 		show_clocks();
 	if (systems)
 		show_systems();
+	if (compression)
+		show_compression();
 	if (show_all) {
 		printf("event systems:\n");
 		show_systems();
@@ -517,7 +751,8 @@ void trace_list(int argc, char **argv)
 		printf("\ntracers:\n");
 		show_tracers();
 		printf("\noptions:\n");
-		show_options();
+		show_options(NULL, NULL);
+		show_compression();
 	}
 
 	return;

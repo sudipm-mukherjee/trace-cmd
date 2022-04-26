@@ -236,7 +236,7 @@ static pid_t do_fork()
 	return fork();
 }
 
-static void agent_serve(unsigned int port)
+static void agent_serve(unsigned int port, bool do_daemon)
 {
 	int sd, cd, nr_cpus;
 	unsigned int cid;
@@ -250,9 +250,13 @@ static void agent_serve(unsigned int port)
 	sd = trace_make_vsock(port);
 	if (sd < 0)
 		die("Failed to open vsocket");
+	tracecmd_tsync_init();
 
 	if (!get_local_cid(&cid))
 		printf("listening on @%u:%u\n", cid, port);
+
+	if (do_daemon && daemon(1, 0))
+		die("daemon");
 
 	for (;;) {
 		cd = accept(sd, NULL, NULL);
@@ -280,6 +284,7 @@ busy:
 }
 
 enum {
+	OPT_verbose	= 254,
 	DO_DEBUG	= 255
 };
 
@@ -300,6 +305,7 @@ void trace_agent(int argc, char **argv)
 			{"port", required_argument, NULL, 'p'},
 			{"help", no_argument, NULL, '?'},
 			{"debug", no_argument, NULL, DO_DEBUG},
+			{"verbose", optional_argument, NULL, OPT_verbose},
 			{NULL, 0, NULL, 0}
 		};
 
@@ -320,6 +326,10 @@ void trace_agent(int argc, char **argv)
 		case DO_DEBUG:
 			tracecmd_set_debug(true);
 			break;
+		case OPT_verbose:
+			if (trace_set_verbose(optarg) < 0)
+				die("invalid verbose level %s", optarg);
+			break;
 		default:
 			usage(argv);
 		}
@@ -328,8 +338,5 @@ void trace_agent(int argc, char **argv)
 	if (optind < argc-1)
 		usage(argv);
 
-	if (do_daemon && daemon(1, 0))
-		die("daemon");
-
-	agent_serve(port);
+	agent_serve(port, do_daemon);
 }

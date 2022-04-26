@@ -62,10 +62,20 @@ static struct usage_help usage_help[] = {
 		"          --no-filter include trace-cmd threads in the trace\n"
 		"          --proc-map save the traced processes address map into the trace.dat file\n"
 		"          --user execute the specified [command ...] as given user\n"
+		"          --tsc2nsec Convert the current clock to nanoseconds, using tsc multiplier and shift from the Linux"
+		"               kernel's perf interface\n"
 		"          --tsync-interval set the loop interval, in ms, for timestamps synchronization with guests:"
 		"               If a negative number is specified, timestamps synchronization is disabled"
 		"               If 0 is specified, no loop is performed - timestamps offset is calculated only twice,"
 		"                                                         at the beginnig and at the end of the trace\n"
+		"          --poll don't block while reading from the trace buffer\n"
+		"          --name used with -A to give the agent a specific name\n"
+		"          --file-version set the desired trace file version\n"
+		"          --compression compress the trace output file, one of these strings can be passed:\n"
+		"                            any  - auto select the best available compression algorithm\n"
+		"                            none - do not compress the trace file\n"
+		"                            name - the name of the desired compression algorithms\n"
+		"                        available algorithms can be listed with trace-cmd list -c\n"
 	},
 	{
 		"set",
@@ -102,6 +112,7 @@ static struct usage_help usage_help[] = {
 		"          --cmdlines-size change kernel saved_cmdlines_size\n"
 		"          --user execute the specified [command ...] as given user\n"
 		"          --fork return immediately if a command is specified\n"
+		"          --verbose 'level' Set the desired log level\n"
 	},
 	{
 		"start",
@@ -111,6 +122,7 @@ static struct usage_help usage_help[] = {
 		"          It only enables the tracing and exits\n"
 		"\n"
 		"        --fork: If a command is specified, then return right after it forks\n"
+		"        --verbose 'level' Set the desired log level\n"
 	},
 	{
 		"extract",
@@ -121,6 +133,7 @@ static struct usage_help usage_help[] = {
 		"          -B : extract a given buffer (more than one may be specified)\n"
 		"          -a : extract all buffers (except top one)\n"
 		"          -t : extract the top level buffer (useful with -B and -a)\n"
+		"          --verbose 'level' Set the desired log level\n"
 	},
 	{
 		"stop",
@@ -189,7 +202,7 @@ static struct usage_help usage_help[] = {
 		"report",
 		"read out the trace stored in a trace.dat file",
 		" %s report [-i file] [--cpu cpu] [-e][-f][-l][-P][-L][-N][-R][-E]\\\n"
-		"           [-r events][-n events][-F filter][-v][-V][-T][-O option]\n"
+		"           [-r events][-n events][-F filter][-v][-V[1-6]][-T][-O option]\n"
 		"           [-H [start_system:]start_event,start_match[,pid]/[end_system:]end_event,end_match[,flags]\n"
 		"           [-G]\n"
 		"          -i input file [default trace.dat]\n"
@@ -205,7 +218,8 @@ static struct usage_help usage_help[] = {
 		"          -r raw format the events that match the option\n"
 		"          -v will negate all -F after it (Not show matches)\n"
 		"          -T print out the filter strings created and exit\n"
-		"          -V verbose (shows plugins being loaded)\n"
+		"          -V[level] verbose (shows plugins being loaded)\n"
+		"              With optional level (see --verbose numbers)\n"
 		"          -L load only local (~/.trace-cmd/plugins) plugins\n"
 		"          -N do not load any plugins\n"
 		"          -n ignore plugin handlers for events that match the option\n"
@@ -214,6 +228,7 @@ static struct usage_help usage_help[] = {
 		"          -O plugin option -O [plugin:]var[=val]\n"
 		"          --cpu <cpu1,cpu2,...> - filter events according to the given cpu list.\n"
 		"                                  A range of CPUs can be specified using 'cpuX-cpuY' notation.\n"
+		"          --cpus - List the CPUs that have content in it then exit.\n"
 		"          --check-events return whether all event formats can be parsed\n"
 		"          --stat - show the buffer stats that were reported at the end of the record.\n"
 		"          --uname - show uname of the record, if it was saved\n"
@@ -231,12 +246,24 @@ static struct usage_help usage_help[] = {
 		"                     previous data file, in which case it becomes default\n"
 		"          --ts-diff Show the delta timestamp between events.\n"
 		"          --ts-check Check to make sure no time stamp on any CPU goes backwards.\n"
+		"          --nodate Ignore the --date processing of trace-cmd record.\n"
+		"          --raw-ts Display raw timestamps, without any corrections.\n"
+		"          --align-ts Display timestamps aligned to the first event.\n"
+		"          --verbose[=level] Set the desired log level\n"
+		"                0 or none  - no error messages\n"
+		"                1 or crit  - only critical messages\n"
+		"                2 or err   - 'crit' and error messages\n"
+		"                3 or warn  - 'err' and warning messages\n"
+		"                4 or info  - 'warn' and informational messages\n"
+		"                5 or debug - 'info' and debugging messages\n"
+		"                6 or all   - same as debug\n"
 	},
 	{
 		"stream",
 		"Start tracing and read the output directly",
 		" %s stream [-e event][-p plugin][-d][-O option ][-P pid]\n"
 		"          Uses same options as record but does not write to files or the network.\n"
+		"          --verbose 'level' Set the desired log level\n"
 	},
 	{
 		"profile",
@@ -245,6 +272,7 @@ static struct usage_help usage_help[] = {
 		"    [-H [start_system:]start_event,start_match[,pid]/[end_system:]end_event,end_match[,flags]\n\n"
 		"          Uses same options as record --profile.\n"
 		"          -H Allows users to hook two events together for timings\n"
+		"          --verbose 'level' Set the desired log level\n"
 	},
 	{
 		"hist",
@@ -255,7 +283,10 @@ static struct usage_help usage_help[] = {
 	{
 		"stat",
 		"show the status of the running tracing (ftrace) system",
-		" %s stat"
+		" %s stat [-B buf][-t][-o]"
+		"          -B show the status of a instance buffer\n"
+		"          -t show the top level status along with buffer specified by -B\n"
+		"          -o list tracing options\n"
 	},
 	{
 		"split",
@@ -290,6 +321,7 @@ static struct usage_help usage_help[] = {
 		"          -o file name to use for clients.\n"
 		"          -d directory to store client files.\n"
 		"          -l logfile to write messages to.\n"
+		"          --verbose 'level' Set the desired log level\n"
 	},
 #ifdef VSOCK
 	{
@@ -299,6 +331,7 @@ static struct usage_help usage_help[] = {
 		"          Creates a vsocket to listen for clients.\n"
 		"          -p port number to listen on.\n"
 		"          -D run in daemon mode.\n"
+		"          --verbose 'level' Set the desired log level\n"
 	},
 	{
 		"setup-guest",
@@ -316,6 +349,7 @@ static struct usage_help usage_help[] = {
 		" %s list [-e [regex]][-t][-o][-f [regex]]\n"
 		"          -e list available events\n"
 		"            -F show event format\n"
+		"            --full show the print fmt with -F\n"
 		"            -R show event triggers\n"
 		"            -l show event filters\n"
 		"          -t list available tracers\n"
@@ -325,6 +359,7 @@ static struct usage_help usage_help[] = {
 		"          -O list plugin options\n"
 		"          -B list defined buffer instances\n"
 		"          -C list the defined clocks (and active one)\n"
+		"          -c list the supported trace file compression algorithms\n"
 	},
 	{
 		"restore",
@@ -352,12 +387,14 @@ static struct usage_help usage_help[] = {
 		"          --start  enable the stack tracer\n"
 		"          --stop   disable the stack tracer\n"
 		"          --reset  reset the maximum stack found\n"
+		"          --verbose 'level' Set the desired log level\n"
 	},
 	{
 		"check-events",
 		"parse trace event formats",
 		" %s check-events [-N]\n"
 		"          -N do not load any plugins\n"
+		"          --verbose 'level' Set the desired log level\n"
 	},
 	{
 		"dump",
@@ -377,8 +414,23 @@ static struct usage_help usage_help[] = {
 		"          --cmd-lines print information mapping a PID to a process name\n"
 		"          --options print options\n"
 		"          --flyrecord information of offset and count of recorded events per CPU\n"
+		"          --clock trace clock, saved in the file\n"
 		"          -h, --help show usage information\n"
+		"          --verbose 'level' Set the desired log level\n"
 	},
+	{
+		"convert",
+		"convert trace file to different version",
+		" %s convert [options]\n"
+		"          -i input file, default is trace.dat\n"
+		"          -o output file, mandatory parameter.\n"
+		"             The output file can be specified also as last argument of the command\n"
+		"          --file-version set the desired trace file version\n"
+		"          --compression compress the trace output file, one of these strings can be passed:\n"
+		"                            any  - auto select the best available compression algorithm\n"
+		"                            none - do not compress the trace file\n"
+		"                            name - the name of the desired compression algorithms\n"
+		"                        available algorithms can be listed with trace-cmd list -c\n"	},
 	{
 		NULL, NULL, NULL
 	}

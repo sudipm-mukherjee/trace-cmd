@@ -16,7 +16,7 @@ Description: Utility for retrieving and analyzing function tracing in the kernel
  This package contains the trace-cmd utility. Trace-cmd makes it easy to
  retrieve and analyze function traces from the Linux kernel while it is running.
 
-Package: libtracecmd0
+Package: libtracecmd1
 Section: libs
 Architecture: any
 Depends: ${shlibs:Depends}, ${misc:Depends}
@@ -28,8 +28,8 @@ Description: Library for creating and reading trace-cmd data files (shared libra
 Package: libtracecmd-dev
 Section: libdevel
 Architecture: any
-Depends: libtracecmd0 (= ${binary:Version}), ${misc:Depends}
+Depends: libtracecmd1 (= ${binary:Version}), ${misc:Depends}
 Description: Library for creating and reading trace-cmd data files (development files)
  The libtracecmd library provides APIs to read trace-cmd data files.
  .
- This package is needed to compile programs against libtracecmd0.
+ This package is needed to compile programs against libtracecmd1.

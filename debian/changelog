@@ -1,3 +1,14 @@
+trace-cmd (3.0.3-1) experimental; urgency=medium
+
+  * Update to upstream v3.0.3
+    - Update doc path.
+    - Add symbols.
+    - Update soname.
+    - Update copyright.
+    - Remove patches.
+
+ -- Sudip Mukherjee <sudipm.mukherjee@gmail.com>  Sun, 01 May 2022 01:11:55 +0100
+
 trace-cmd (2.9.6-2) unstable; urgency=medium
 
   * Modify autopkgtest.

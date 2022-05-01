@@ -2,7 +2,9 @@ Source: trace-cmd
 Section: devel
 Priority: optional
 Maintainer: Sudip Mukherjee <sudipm.mukherjee@gmail.com>
-Build-Depends: debhelper-compat (= 13), asciidoc, docbook-xsl, xsltproc, libcunit1-dev, xmlto, pkg-config, libtraceevent-dev, libtracefs-dev
+Build-Depends:
+ debhelper-compat (= 13), asciidoc, docbook-xsl, xsltproc, libcunit1-dev,
+ xmlto, pkg-config, libtraceevent-dev, libtracefs-dev, libzstd-dev, source-highlight
 Standards-Version: 4.6.0.1
 Rules-Requires-Root: no
 Vcs-Browser: https://github.com/sudipm-mukherjee/trace-cmd.git

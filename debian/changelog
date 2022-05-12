@@ -1,3 +1,9 @@
+trace-cmd (3.0.3-2) experimental; urgency=medium
+
+  * Add upstream patch to fix build.
+
+ -- Sudip Mukherjee <sudipm.mukherjee@gmail.com>  Thu, 12 May 2022 22:20:36 +0100
+
 trace-cmd (3.0.3-1) experimental; urgency=medium
 
   * Update to upstream v3.0.3

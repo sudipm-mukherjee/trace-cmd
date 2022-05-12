@@ -1,0 +1,42 @@
+From cd407ca5e0c723f61f22261799de3c39db7c8cb5 Mon Sep 17 00:00:00 2001
+From: "Steven Rostedt (Google)" <rostedt@goodmis.org>
+Date: Mon, 4 Apr 2022 11:14:14 -0400
+Subject: [PATCH] trace-cmd library: Make msg_lseek() header prototype match
+ the function prototype
+
+msg_lseek() is defined in the header as:
+
+  off64_t msg_lseek(struct tracecmd_msg_handle *msg_handle, off_t offset, int whence);
+
+Where as the function is defined as:
+
+  off64_t msg_lseek(struct tracecmd_msg_handle *msg_handle, off64_t offset, int whence)
+
+That is, the header has "off_t offset" and the C code has "off64_t offset".
+
+Make the two match, as it causes build issues on some systems.
+
+Link: https://lore.kernel.org/linux-trace-devel/20220404111414.426850bf@gandalf.local.home
+
+Fixes: bea1bfd0b19f9 ("trace-cmd: Make msg_lseek() header prototype match the function prototype")
+Signed-off-by: Steven Rostedt (Google) <rostedt@goodmis.org>
+---
+ lib/trace-cmd/include/trace-cmd-local.h | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/lib/trace-cmd/include/trace-cmd-local.h b/lib/trace-cmd/include/trace-cmd-local.h
+index f9892fa..6ac3413 100644
+--- a/lib/trace-cmd/include/trace-cmd-local.h
++++ b/lib/trace-cmd/include/trace-cmd-local.h
+@@ -91,7 +91,7 @@ struct cpu_data_source {
+ int out_write_cpu_data(struct tracecmd_output *handle, int cpus,
+ 		       struct cpu_data_source *data, const char *buff_name);
+ int out_write_emty_cpu_data(struct tracecmd_output *handle, int cpus);
+-off64_t msg_lseek(struct tracecmd_msg_handle *msg_handle, off_t offset, int whence);
++off64_t msg_lseek(struct tracecmd_msg_handle *msg_handle, off64_t offset, int whence);
+ unsigned long long get_last_option_offset(struct tracecmd_input *handle);
+ unsigned int get_meta_strings_size(struct tracecmd_input *handle);
+ 
+-- 
+2.30.2
+

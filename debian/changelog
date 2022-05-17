@@ -1,3 +1,9 @@
+trace-cmd (3.0.3-3) unstable; urgency=medium
+
+  * Upload to unstable.
+
+ -- Sudip Mukherjee <sudipm.mukherjee@gmail.com>  Tue, 17 May 2022 09:23:55 +0100
+
 trace-cmd (3.0.3-2) experimental; urgency=medium
 
   * Add upstream patch to fix build.

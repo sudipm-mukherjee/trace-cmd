@@ -91,8 +91,10 @@ struct cpu_data_source {
 int out_write_cpu_data(struct tracecmd_output *handle, int cpus,
 		       struct cpu_data_source *data, const char *buff_name);
 int out_write_emty_cpu_data(struct tracecmd_output *handle, int cpus);
-off64_t msg_lseek(struct tracecmd_msg_handle *msg_handle, off_t offset, int whence);
+off64_t msg_lseek(struct tracecmd_msg_handle *msg_handle, off64_t offset, int whence);
 unsigned long long get_last_option_offset(struct tracecmd_input *handle);
 unsigned int get_meta_strings_size(struct tracecmd_input *handle);
+int trace_append_options(struct tracecmd_output *handle, void *buf, size_t len);
+void *trace_get_options(struct tracecmd_output *handle, size_t *len);
 
 #endif /* _TRACE_CMD_LOCAL_H */

@@ -43,6 +43,9 @@ enum {
 	RINGBUF_TYPE_TIME_STAMP		= 31,
 };
 
+/* Can be overridden */
+void tracecmd_debug(const char *fmt, ...);
+
 void tracecmd_record_ref(struct tep_record *record);
 
 void tracecmd_set_debug(bool set_debug);
@@ -330,6 +333,7 @@ int tracecmd_write_buffer_info(struct tracecmd_output *handle);
 
 int tracecmd_write_cpus(struct tracecmd_output *handle, int cpus);
 int tracecmd_write_cmdlines(struct tracecmd_output *handle);
+int tracecmd_prepare_options(struct tracecmd_output *handle, off64_t offset, int whence);
 int tracecmd_write_options(struct tracecmd_output *handle);
 int tracecmd_write_meta_strings(struct tracecmd_output *handle);
 int tracecmd_append_options(struct tracecmd_output *handle);
@@ -374,19 +378,25 @@ long tracecmd_flush_recording(struct tracecmd_recorder *recorder);
 
 enum tracecmd_msg_flags {
 	TRACECMD_MSG_FL_USE_TCP		= 1 << 0,
+	TRACECMD_MSG_FL_USE_VSOCK	= 1 << 1,
+	TRACECMD_MSG_FL_PROXY		= 1 << 2,
 };
 
-/* for both client and server */
 #define MSG_CACHE_FILE "/tmp/trace_msg_cacheXXXXXX"
+
+/* for both client and server */
 struct tracecmd_msg_handle {
 	int			fd;
 	short			cpu_count;
 	short			version;	/* Current protocol version */
 	unsigned long		flags;
+	off64_t			cache_start_offset;
 	bool			done;
 	bool			cache;
 	int			cfd;
+#ifndef HAVE_MEMFD_CREATE
 	char			cfile[sizeof(MSG_CACHE_FILE)];
+#endif
 };
 
 struct tracecmd_tsync_protos {
@@ -406,10 +416,13 @@ int tracecmd_msg_send_init_data(struct tracecmd_msg_handle *msg_handle,
 int tracecmd_msg_data_send(struct tracecmd_msg_handle *msg_handle,
 			       const char *buf, int size);
 int tracecmd_msg_finish_sending_data(struct tracecmd_msg_handle *msg_handle);
+int tracecmd_msg_flush_data(struct tracecmd_msg_handle *msg_handle);
 int tracecmd_msg_send_close_msg(struct tracecmd_msg_handle *msg_handle);
 int tracecmd_msg_send_close_resp_msg(struct tracecmd_msg_handle *msg_handle);
 int tracecmd_msg_wait_close(struct tracecmd_msg_handle *msg_handle);
 int tracecmd_msg_wait_close_resp(struct tracecmd_msg_handle *msg_handle);
+int tracecmd_msg_cont(struct tracecmd_msg_handle *msg_handle);
+int tracecmd_msg_wait(struct tracecmd_msg_handle *msg_handle);
 
 /* for server */
 int tracecmd_msg_initial_setting(struct tracecmd_msg_handle *msg_handle);
@@ -419,15 +432,30 @@ int tracecmd_msg_read_data(struct tracecmd_msg_handle *msg_handle, int ofd);
 int tracecmd_msg_collect_data(struct tracecmd_msg_handle *msg_handle, int ofd);
 bool tracecmd_msg_done(struct tracecmd_msg_handle *msg_handle);
 void tracecmd_msg_set_done(struct tracecmd_msg_handle *msg_handle);
+int tracecmd_msg_read_options(struct tracecmd_msg_handle *msg_handle,
+			      struct tracecmd_output *handle);
+int tracecmd_msg_send_options(struct tracecmd_msg_handle *msg_handle,
+			      struct tracecmd_output *handle);
 
 int tracecmd_msg_send_trace_req(struct tracecmd_msg_handle *msg_handle,
 				int argc, char **argv, bool use_fifos,
 				unsigned long long trace_id,
 				struct tracecmd_tsync_protos *protos);
+int tracecmd_msg_send_trace_proxy(struct tracecmd_msg_handle *msg_handle,
+				  int argc, char **argv, bool use_fifos,
+				  unsigned long long trace_id,
+				  struct tracecmd_tsync_protos *protos,
+				  unsigned int nr_cpus,
+				  unsigned int siblings);
 int tracecmd_msg_recv_trace_req(struct tracecmd_msg_handle *msg_handle,
 				int *argc, char ***argv, bool *use_fifos,
 				unsigned long long *trace_id,
 				struct tracecmd_tsync_protos **protos);
+int tracecmd_msg_recv_trace_proxy(struct tracecmd_msg_handle *msg_handle,
+				  int *argc, char ***argv, bool *use_fifos,
+				  unsigned long long *trace_id,
+				  struct tracecmd_tsync_protos **protos,
+				  unsigned int *cpus, unsigned int *siblings);
 
 int tracecmd_msg_send_trace_resp(struct tracecmd_msg_handle *msg_handle,
 				 int nr_cpus, int page_size,
@@ -479,6 +507,8 @@ enum{
 enum tracecmd_time_sync_role {
 	TRACECMD_TIME_SYNC_ROLE_HOST	= (1 << 0),
 	TRACECMD_TIME_SYNC_ROLE_GUEST	= (1 << 1),
+	TRACECMD_TIME_SYNC_ROLE_CLIENT	= (1 << 2),
+	TRACECMD_TIME_SYNC_ROLE_SERVER	= (1 << 3),
 };
 
 /* Timestamp synchronization flags */
@@ -488,20 +518,19 @@ void tracecmd_tsync_init(void);
 int tracecmd_tsync_proto_getall(struct tracecmd_tsync_protos **protos, const char *clock, int role);
 bool tsync_proto_is_supported(const char *proto_name);
 struct tracecmd_time_sync *
-tracecmd_tsync_with_host(const struct tracecmd_tsync_protos *tsync_protos,
-			 const char *clock);
+tracecmd_tsync_with_host(int fd, const char *proto, const char *clock,
+			 int remote_id, int local_id);
 int tracecmd_tsync_with_host_stop(struct tracecmd_time_sync *tsync);
 struct tracecmd_time_sync *
 tracecmd_tsync_with_guest(unsigned long long trace_id, int loop_interval,
-			  unsigned int cid, unsigned int port, int guest_pid,
+			  unsigned int fd, int guest_pid,
 			  int guest_cpus, const char *proto_name, const char *clock);
 int tracecmd_tsync_with_guest_stop(struct tracecmd_time_sync *tsync);
 int tracecmd_tsync_get_offsets(struct tracecmd_time_sync *tsync, int cpu,
 			       int *count, long long **ts,
 			       long long **offsets, long long **scalings, long long **frac);
-int tracecmd_tsync_get_session_params(struct tracecmd_time_sync *tsync,
-				      char **selected_proto,
-				      unsigned int *tsync_port);
+const char *tracecmd_tsync_get_proto(const struct tracecmd_tsync_protos *protos,
+			 const char *clock, enum tracecmd_time_sync_role role);
 void tracecmd_tsync_free(struct tracecmd_time_sync *tsync);
 int tracecmd_write_guest_time_shift(struct tracecmd_output *handle,
 				    struct tracecmd_time_sync *tsync);

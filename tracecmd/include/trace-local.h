@@ -9,6 +9,7 @@
 #include <sys/types.h>
 #include <dirent.h>	/* for DIR */
 #include <ctype.h>	/* for isdigit() */
+#include <errno.h>
 #include <limits.h>
 
 #include "trace-cmd-private.h"
@@ -40,6 +41,12 @@ extern int silence_warnings;
 extern int show_status;
 
 int trace_set_verbose(char *level);
+
+enum port_type {
+	USE_UDP			= 0,	/* Default setting */
+	USE_TCP,
+	USE_VSOCK
+};
 
 struct pid_record_data {
 	int			pid;
@@ -114,8 +121,9 @@ void trace_convert(int argc, char **argv);
 
 int trace_record_agent(struct tracecmd_msg_handle *msg_handle,
 		       int cpus, int *fds,
-		       int argc, char **argv, bool use_fifos,
-		       unsigned long long trace_id);
+		       int argc, char **argv,
+		       bool use_fifos, struct tracecmd_time_sync *tsync,
+		       unsigned long long trace_id, int rcid, const char *host);
 
 struct hook_list;
 
@@ -182,6 +190,8 @@ enum buffer_instance_flags {
 	BUFFER_FL_AGENT		= 1 << 3,
 	BUFFER_FL_HAS_CLOCK	= 1 << 4,
 	BUFFER_FL_TSC2NSEC	= 1 << 5,
+	BUFFER_FL_NETWORK	= 1 << 6,
+	BUFFER_FL_PROXY		= 1 << 7,
 };
 
 struct func_list {
@@ -259,6 +269,7 @@ struct buffer_instance {
 
 	struct tracecmd_msg_handle *msg_handle;
 	struct tracecmd_output *network_handle;
+	const char		*host;
 
 	struct pid_addr_maps	*pid_maps;
 
@@ -270,14 +281,18 @@ struct buffer_instance {
 	int			buffer_size;
 	int			cpu_count;
 
+	int			proxy_fd;
+
 	int			argc;
 	char			**argv;
 
+	struct addrinfo		*result;
 	unsigned int		cid;
 	unsigned int		port;
 	int			*fds;
 	bool			use_fifos;
 
+	enum port_type		port_type;	/* Default to USE_UDP (zero) */
 	int			tsync_loop_interval;
 	struct tracecmd_time_sync *tsync;
 };
@@ -294,6 +309,22 @@ extern struct buffer_instance *first_instance;
 
 #define is_agent(instance)	((instance)->flags & BUFFER_FL_AGENT)
 #define is_guest(instance)	((instance)->flags & BUFFER_FL_GUEST)
+#define is_proxy(instance)	((instance)->flags & BUFFER_FL_PROXY)
+#define is_network(instance)	((instance)->flags & BUFFER_FL_NETWORK)
+#define is_proxy_server(instance)					\
+	((instance)->msg_handle &&					\
+	 (instance)->msg_handle->flags & TRACECMD_MSG_FL_PROXY)
+
+#define START_PORT_SEARCH 1500
+#define MAX_PORT_SEARCH 6000
+
+struct sockaddr_storage;
+
+int trace_net_make(int port, enum port_type type);
+int trace_net_search(int start_port, int *sfd, enum port_type type);
+int trace_net_print_connection(int fd);
+bool trace_net_cmp_connection(struct sockaddr_storage *addr, const char *name);
+bool trace_net_cmp_connection_fd(int fd, const char *name);
 
 struct buffer_instance *allocate_instance(const char *name);
 void add_instance(struct buffer_instance *instance, int cpu_count);
@@ -305,6 +336,7 @@ void show_options(const char *prefix, struct buffer_instance *buffer);
 struct trace_guest {
 	struct tracefs_instance *instance;
 	char *name;
+	unsigned long long trace_id;
 	int cid;
 	int pid;
 	int cpu_max;
@@ -316,6 +348,17 @@ bool trace_have_guests_pid(void);
 void read_qemu_guests(void);
 int get_guest_pid(unsigned int guest_cid);
 int get_guest_vcpu_pid(unsigned int guest_cid, unsigned int guest_vcpu);
+void trace_add_guest_info(struct tracecmd_output *handle, struct buffer_instance *instance);
+
+struct tracecmd_time_sync *
+trace_tsync_as_host(int fd, unsigned long long trace_id,
+		    int loop_interval, int guest_id,
+		    int guest_cpus, const char *proto_name,
+		    const char *clock);
+
+struct tracecmd_time_sync *
+trace_tsync_as_guest(int fd, const char *tsync_proto, const char *clock,
+	       unsigned int remote_id, unsigned int local_id);
 
 /* moved from trace-cmd.h */
 void tracecmd_remove_instances(void);
@@ -337,7 +380,61 @@ int trace_make_vsock(unsigned int port);
 int trace_get_vsock_port(int sd, unsigned int *port);
 int trace_open_vsock(unsigned int cid, unsigned int port);
 
+int get_local_cid(unsigned int *cid);
+
 char *trace_get_guest_file(const char *file, const char *guest);
+
+#ifdef VSOCK
+int trace_vsock_open(unsigned int cid, unsigned int port);
+int trace_vsock_make(unsigned int port);
+int trace_vsock_make_any(void);
+int get_vsocket_params(int fd, unsigned int *lcid, unsigned int *rcid);
+int trace_vsock_get_port(int sd, unsigned int *port);
+bool trace_vsock_can_splice_read(void);
+int trace_vsock_local_cid(void);
+int trace_vsock_print_connection(int fd);
+#else
+static inline int trace_vsock_open(unsigned int cid, unsigned int port)
+{
+	return -ENOTSUP;
+}
+
+static inline int trace_vsock_make(unsigned int port)
+{
+	return -ENOTSUP;
+
+}
+
+static inline int trace_vsock_make_any(void)
+{
+	return -ENOTSUP;
+
+}
+
+static inline int get_vsocket_params(int fd, unsigned int *lcid, unsigned int *rcid)
+{
+	return -ENOTSUP;
+}
+
+static inline int trace_vsock_get_port(int sd, unsigned int *port)
+{
+	return -ENOTSUP;
+}
+
+static inline bool trace_vsock_can_splice_read(void)
+{
+	return false;
+}
+
+static inline int trace_vsock_local_cid(void)
+{
+	return -ENOTSUP;
+}
+static inline int trace_vsock_print_connection(int fd)
+{
+	return -1;
+}
+#endif /* VSOCK */
 
 /* No longer in event-utils.h */
 __printf(1,2)

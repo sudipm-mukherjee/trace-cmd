@@ -16,7 +16,6 @@
 #include "tracefs.h"
 #include "trace-tsync-local.h"
 
-#define KVM_DEBUG_FS "/sys/kernel/debug/kvm"
 #define KVM_DEBUG_OFFSET_FILE	"tsc-offset"
 #define KVM_DEBUG_SCALING_FILE	"tsc-scaling-ratio"
 #define KVM_DEBUG_FRACTION_FILE	"tsc-scaling-ratio-frac-bits"
@@ -73,24 +72,29 @@ static int read_ll_from_file(char *file, long long *res)
 	return 0;
 }
 
+/*
+ * Returns true if both scaling and fraction exist or both do
+ * not exist. false if one exists without the other or if there
+ * is a memory error.
+ */
 static bool kvm_scaling_check_vm_cpu(char *vname, char *cpu)
 {
-	long long scaling, frac;
 	bool has_scaling = false;
 	bool has_frac = false;
+	struct stat st;
 	char *path;
 	int ret;
 
 	if (asprintf(&path, "%s/%s/%s", vname, cpu, KVM_DEBUG_SCALING_FILE) < 0)
 		return false;
-	ret = read_ll_from_file(path, &scaling);
+	ret = stat(path, &st);
 	free(path);
 	if (!ret)
 		has_scaling = true;
 
 	if (asprintf(&path, "%s/%s/%s", vname, cpu, KVM_DEBUG_FRACTION_FILE) < 0)
 		return false;
-	ret = read_ll_from_file(path, &frac);
+	ret = stat(path, &st);
 	free(path);
 	if (!ret)
 		has_frac = true;
@@ -101,61 +105,106 @@ static bool kvm_scaling_check_vm_cpu(char *vname, char *cpu)
 	return true;
 }
 
+static const char *kvm_debug_dir(void)
+{
+	const char *debugfs;
+	static char *kvm_dir;
+
+	if (kvm_dir)
+		return kvm_dir;
+
+	debugfs = tracefs_debug_dir();
+	if (!debugfs)
+		return NULL;
+
+	if (asprintf(&kvm_dir, "%s/kvm", debugfs) < 0)
+		return NULL;
+
+	return kvm_dir;
+}
+
+/*
+ * Returns true if a VCPU exists with a tsc-offset file and that
+ * the scaling files for ratio and fraction both exist or both
+ * do not exist. False if there is no VM with a tsc-offset or
+ * there is only one of the two scaling files, or there's a
+ * memory issue.
+ */
 static bool kvm_scaling_check_vm(char *name)
 {
 	struct dirent *entry;
+	const char *kvm;
 	char *vdir;
 	DIR *dir;
+	bool valid = false;
 
-	if (asprintf(&vdir, "%s/%s", KVM_DEBUG_FS, name) < 0)
-		return true;
+	kvm = kvm_debug_dir();
+	if (!kvm)
+		return false;
+
+	if (asprintf(&vdir, "%s/%s", kvm, name) < 0)
+		return false;
 
 	dir = opendir(vdir);
 	if (!dir) {
 		free(vdir);
-		return true;
+		return false;
 	}
 	while ((entry = readdir(dir))) {
-		if (entry->d_type == DT_DIR && !strncmp(entry->d_name, "vcpu", 4) &&
-		    !kvm_scaling_check_vm_cpu(vdir, entry->d_name))
-			break;
+		if (entry->d_type == DT_DIR && !strncmp(entry->d_name, "vcpu", 4)) {
+			if (!kvm_scaling_check_vm_cpu(vdir, entry->d_name))
+				break;
+			valid = true;
+		}
 	}
 
 	closedir(dir);
 	free(vdir);
-	return entry == NULL;
+	return valid && entry == NULL;
 }
+
+/*
+ * Returns true if all VMs have a tsc-offset file and that
+ * the scaling files for ratio and fraction both exist or both
+ * do not exist. False if a VM with a tsc-offset or there is only
+ * one of the two scaling files, or no VM exists or there's a memory issue.
+ */
 static bool kvm_scaling_check(void)
 {
 	struct dirent *entry;
+	const char *kvm;
 	DIR *dir;
+	bool valid = false;
 
-	dir = opendir(KVM_DEBUG_FS);
+	kvm = kvm_debug_dir();
+	if (!kvm)
+		return false;
+
+	dir = opendir(kvm);
 	if (!dir)
 		return true;
 
 	while ((entry = readdir(dir))) {
-		if (entry->d_type == DT_DIR && isdigit(entry->d_name[0]) &&
-		    !kvm_scaling_check_vm(entry->d_name))
-			break;
+		if (entry->d_type == DT_DIR && isdigit(entry->d_name[0])) {
+			if (!kvm_scaling_check_vm(entry->d_name))
+				break;
+			valid = true;
+		}
 	}
 	closedir(dir);
-	return entry == NULL;
+	return valid && entry == NULL;
 }
 
 static bool kvm_support_check(bool guest)
 {
-	struct stat st;
-	int ret;
+	const char *kvm;
 
+	/* The kvm files are only in the host so we can ignore guests */
 	if (guest)
 		return true;
 
-	ret = stat(KVM_DEBUG_FS, &st);
-	if (ret < 0)
-		return false;
-
-	if (!S_ISDIR(st.st_mode))
+	kvm = kvm_debug_dir();
+	if (!kvm)
 		return false;
 
 	return kvm_scaling_check();
@@ -216,7 +265,7 @@ static int kvm_open_debug_files(struct kvm_clock_sync *kvm, int pid)
 	DIR *dir;
 	int i;
 
-	dir = opendir(KVM_DEBUG_FS);
+	dir = opendir(kvm_debug_dir());
 	if (!dir)
 		goto error;
 	if (asprintf(&pid_str, "%d-", pid) <= 0)
@@ -225,7 +274,7 @@ static int kvm_open_debug_files(struct kvm_clock_sync *kvm, int pid)
 		if (!(entry->d_type == DT_DIR &&
 		    !strncmp(entry->d_name, pid_str, strlen(pid_str))))
 			continue;
-		asprintf(&vm_dir_str, "%s/%s", KVM_DEBUG_FS, entry->d_name);
+		asprintf(&vm_dir_str, "%s/%s", kvm_debug_dir(), entry->d_name);
 		break;
 	}
 	closedir(dir);

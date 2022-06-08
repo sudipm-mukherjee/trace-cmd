@@ -37,9 +37,6 @@
 #include <poll.h>
 #include <pwd.h>
 #include <grp.h>
-#ifdef VSOCK
-#include <linux/vm_sockets.h>
-#endif
 
 #include "tracefs.h"
 #include "version.h"
@@ -58,6 +55,8 @@
 #define STAMP		"stamp"
 #define FUNC_STACK_TRACE "func_stack_trace"
 #define TSC_CLOCK	"x86-tsc"
+
+#define dprint(fmt, ...)	tracecmd_debug(fmt, ##__VA_ARGS__)
 
 enum trace_type {
 	TRACE_TYPE_RECORD	= 1,
@@ -86,14 +85,14 @@ static bool no_fifos;
 
 static char *host;
 
+static const char *gai_err;
+
 static bool quiet;
 
 static bool fork_process;
 
 /* Max size to let a per cpu file get */
 static int max_kb;
-
-static bool use_tcp;
 
 static int do_ptrace;
 
@@ -687,6 +686,12 @@ add_tsc2nsec(struct tracecmd_output *handle, struct tsc_nsec *tsc2nsec)
 	tracecmd_add_option_v(handle, TRACECMD_OPTION_TSC2NSEC, vector, 3);
 }
 
+static void guest_tsync_complete(struct buffer_instance *instance)
+{
+	tracecmd_tsync_with_host_stop(instance->tsync);
+	tracecmd_tsync_free(instance->tsync);
+}
+
 static void host_tsync_complete(struct common_record_context *ctx,
 				struct buffer_instance *instance)
 {
@@ -721,20 +726,33 @@ static void tell_guests_to_stop(struct common_record_context *ctx)
 
 	/* Send close message to guests */
 	for_all_instances(instance) {
-		if (is_guest(instance))
+		if (is_guest(instance)) {
 			tracecmd_msg_send_close_msg(instance->msg_handle);
+			if (is_proxy(instance) && instance->proxy_fd >= 0) {
+				/* The proxy will send more data now */
+				if (tracecmd_msg_read_data(instance->msg_handle, instance->proxy_fd))
+					warning("Failed receiving finishing metadata");
+				close(instance->proxy_fd);
+			}
+		}
 	}
 
 	for_all_instances(instance) {
-		if (is_guest(instance))
-			host_tsync_complete(ctx, instance);
+		if (is_guest(instance)) {
+			if (is_proxy(instance))
+				guest_tsync_complete(instance);
+			else
+				host_tsync_complete(ctx, instance);
+		}
 	}
 
 	/* Wait for guests to acknowledge */
 	for_all_instances(instance) {
 		if (is_guest(instance)) {
-			tracecmd_msg_wait_close_resp(instance->msg_handle);
-			tracecmd_msg_handle_close(instance->msg_handle);
+			if (!is_proxy(instance)) {
+				tracecmd_msg_wait_close_resp(instance->msg_handle);
+				tracecmd_msg_handle_close(instance->msg_handle);
+			}
 		}
 	}
 }
@@ -3122,23 +3140,36 @@ static void finish(int sig)
 	finished = 1;
 }
 
-static int connect_port(const char *host, unsigned int port)
+static struct addrinfo *do_getaddrinfo(const char *host, unsigned int port,
+				       enum port_type type)
 {
+	struct addrinfo *results;
 	struct addrinfo hints;
-	struct addrinfo *results, *rp;
-	int s, sfd;
 	char buf[BUFSIZ];
+	int s;
 
 	snprintf(buf, BUFSIZ, "%u", port);
 
 	memset(&hints, 0, sizeof(hints));
 	hints.ai_family = AF_UNSPEC;
-	hints.ai_socktype = use_tcp ? SOCK_STREAM : SOCK_DGRAM;
+	hints.ai_socktype = type == USE_TCP ? SOCK_STREAM : SOCK_DGRAM;
 
 	s = getaddrinfo(host, buf, &hints, &results);
-	if (s != 0)
-		die("connecting to %s server %s:%s",
-		    use_tcp ? "TCP" : "UDP", host, buf);
+	if (s != 0) {
+		gai_err = gai_strerror(s);
+		return NULL;
+	}
+
+	dprint("Attached port %s: %d to results: %p\n",
+	       type == USE_TCP ? "TCP" : "UDP", port, results);
+
+	return results;
+}
+
+static int connect_addr(struct addrinfo *results)
+{
+	struct addrinfo *rp;
+	int sfd = -1;
 
 	for (rp = results; rp != NULL; rp = rp->ai_next) {
 		sfd = socket(rp->ai_family, rp->ai_socktype,
@@ -3151,96 +3182,46 @@ static int connect_port(const char *host, unsigned int port)
 	}
 
 	if (rp == NULL)
-		die("Can not connect to %s server %s:%s",
-		    use_tcp ? "TCP" : "UDP", host, buf);
+		return -1;
 
-	freeaddrinfo(results);
+	dprint("connect results: %p with fd: %d\n", results, sfd);
 
 	return sfd;
 }
 
-#ifdef VSOCK
-int trace_open_vsock(unsigned int cid, unsigned int port)
+static int connect_port(const char *host, unsigned int port, enum port_type type)
 {
-	struct sockaddr_vm addr = {
-		.svm_family = AF_VSOCK,
-		.svm_cid = cid,
-		.svm_port = port,
-	};
-	int sd;
+	struct addrinfo *results;
+	int sfd;
 
-	sd = socket(AF_VSOCK, SOCK_STREAM, 0);
-	if (sd < 0)
-		return -errno;
+	if (type == USE_VSOCK)
+		return trace_vsock_open(atoi(host), port);
 
-	if (connect(sd, (struct sockaddr *)&addr, sizeof(addr)))
-		return -errno;
+	results = do_getaddrinfo(host, port, type);
 
-	return sd;
+	if (!results)
+		die("connecting to %s server %s:%u",
+		    type == USE_TCP ? "TCP" : "UDP", host, port);
+
+	sfd = connect_addr(results);
+
+	freeaddrinfo(results);
+
+	if (sfd < 0)
+		die("Can not connect to %s server %s:%u",
+		    type == USE_TCP ? "TCP" : "UDP", host, port);
+
+	return sfd;
 }
-
-static int try_splice_read_vsock(void)
-{
-	int ret, sd, brass[2];
-
-	sd = socket(AF_VSOCK, SOCK_STREAM, 0);
-	if (sd < 0)
-		return -errno;
-
-	ret = pipe(brass);
-	if (ret < 0)
-		goto out_close_sd;
-
-	/*
-	 * On kernels that don't support splice reading from vsockets
-	 * this will fail with EINVAL, or ENOTCONN otherwise.
-	 * Technically, it should never succeed but if it does, claim splice
-	 * reading is supported.
-	 */
-	ret = splice(sd, NULL, brass[1], NULL, 10, 0);
-	if (ret < 0)
-		ret = errno != EINVAL;
-	else
-		ret = 1;
-
-	close(brass[0]);
-	close(brass[1]);
-out_close_sd:
-	close(sd);
-	return ret;
-}
-
-static bool can_splice_read_vsock(void)
-{
-	static bool initialized, res;
-
-	if (initialized)
-		return res;
-
-	res = try_splice_read_vsock() > 0;
-	initialized = true;
-	return res;
-}
-
-#else
-int trace_open_vsock(unsigned int cid, unsigned int port)
-{
-	die("vsock is not supported");
-	return -1;
-}
-
-static bool can_splice_read_vsock(void)
-{
-	return false;
-}
-#endif
 
 static int do_accept(int sd)
 {
 	int cd;
 
 	for (;;) {
+		dprint("Wait on accept: %d\n", sd);
 		cd = accept(sd, NULL, NULL);
+		dprint("accepted: %d\n", cd);
 		if (cd < 0) {
 			if (errno == EINTR)
 				continue;
@@ -3253,46 +3234,22 @@ static int do_accept(int sd)
 	return -1;
 }
 
-/* Find all the tasks associated with the guest pid */
-static void find_tasks(struct trace_guest *guest)
+static char *parse_guest_name(char *gname, int *cid, int *port,
+			      struct addrinfo **res)
 {
-	struct dirent *dent;
-	char *path;
-	DIR *dir;
-	int ret;
-	int tasks = 0;
-
-	ret = asprintf(&path, "/proc/%d/task", guest->pid);
-	if (ret < 0)
-		return;
-
-	dir = opendir(path);
-	free(path);
-	if (!dir)
-		return;
-
-	while ((dent = readdir(dir))) {
-		int *pids;
-		if (!(dent->d_type == DT_DIR && is_digits(dent->d_name)))
-			continue;
-		pids = realloc(guest->task_pids, sizeof(int) * (tasks + 2));
-		if (!pids)
-			break;
-		pids[tasks++] = strtol(dent->d_name, NULL, 0);
-		pids[tasks] = -1;
-		guest->task_pids = pids;
-	}
-	closedir(dir);
-}
-
-static char *parse_guest_name(char *gname, int *cid, int *port)
-{
-	struct trace_guest *guest;
+	struct trace_guest *guest = NULL;
+	struct addrinfo *result;
+	char *ip = NULL;
 	char *p;
 
+	*res = NULL;
+
 	*port = -1;
-	p = strrchr(gname, ':');
-	if (p) {
+	for (p = gname + strlen(gname); p > gname; p--) {
+		if (*p == ':')
+			break;
+	}
+	if (p > gname) {
 		*p = '\0';
 		*port = atoi(p + 1);
 	}
@@ -3302,20 +3259,30 @@ static char *parse_guest_name(char *gname, int *cid, int *port)
 	if (p) {
 		*p = '\0';
 		*cid = atoi(p + 1);
-	} else if (is_digits(gname))
+	} else if (is_digits(gname)) {
 		*cid = atoi(gname);
+	} else {
+		/* Check if this is an IP address */
+		if (strstr(gname, ":") || strstr(gname, "."))
+			ip = gname;
+	}
 
-	if (*cid < 0)
+	if (!ip && *cid < 0)
 		read_qemu_guests();
 
-	guest = trace_get_guest(*cid, gname);
+	if (!ip)
+		guest = trace_get_guest(*cid, gname);
 	if (guest) {
 		*cid = guest->cid;
-		/* Mapping not found, search for them */
-		if (!guest->cpu_pid)
-			find_tasks(guest);
 		return guest->name;
 	}
+
+	/* Test to see if this is an internet address */
+	result = do_getaddrinfo(gname, *port, USE_TCP);
+	if (!result)
+		return NULL;
+
+	*res = result;
 
 	return gname;
 }
@@ -3358,6 +3325,7 @@ create_recorder_instance(struct buffer_instance *instance, const char *file, int
 			 int *brass)
 {
 	struct tracecmd_recorder *record;
+	struct addrinfo *result;
 	char *path;
 
 	if (is_guest(instance)) {
@@ -3366,15 +3334,25 @@ create_recorder_instance(struct buffer_instance *instance, const char *file, int
 
 		if (instance->use_fifos)
 			fd = instance->fds[cpu];
-		else
-			fd = trace_open_vsock(instance->cid, instance->client_ports[cpu]);
+		else if (is_network(instance)) {
+			result = do_getaddrinfo(instance->name,
+						instance->client_ports[cpu],
+						instance->port_type);
+			if (!result)
+				die("Failed to connect to %s port %d\n",
+				    instance->name,
+				    instance->client_ports[cpu]);
+			fd = connect_addr(result);
+			freeaddrinfo(result);
+		} else
+			fd = trace_vsock_open(instance->cid, instance->client_ports[cpu]);
 		if (fd < 0)
 			die("Failed to connect to agent");
 
 		flags = recorder_flags;
 		if (instance->use_fifos)
 			flags |= TRACECMD_RECORD_NOBRASS;
-		else if (!can_splice_read_vsock())
+		else if (!trace_vsock_can_splice_read())
 			flags |= TRACECMD_RECORD_NOSPLICE;
 		return tracecmd_create_recorder_virt(file, cpu, flags, fd);
 	}
@@ -3432,10 +3410,19 @@ static int create_recorder(struct buffer_instance *instance, int cpu,
 		if (is_agent(instance)) {
 			if (instance->use_fifos)
 				fd = instance->fds[cpu];
-			else
+			else {
+ again:
 				fd = do_accept(instance->fds[cpu]);
+				if (instance->host &&
+				    !trace_net_cmp_connection_fd(fd, instance->host)) {
+					dprint("Client does not match '%s' for cpu:%d\n",
+					       instance->host, cpu);
+					goto again;
+				}
+			}
 		} else {
-			fd = connect_port(host, instance->client_ports[cpu]);
+			fd = connect_port(host, instance->client_ports[cpu],
+					  instance->port_type);
 		}
 		if (fd < 0)
 			die("Failed connecting to client");
@@ -3490,8 +3477,9 @@ static void check_first_msg_from_server(struct tracecmd_msg_handle *msg_handle)
 }
 
 static void communicate_with_listener_v1(struct tracecmd_msg_handle *msg_handle,
-					 unsigned int **client_ports)
+					 struct buffer_instance *instance)
 {
+	unsigned int *client_ports;
 	char buf[BUFSIZ];
 	ssize_t n;
 	int cpu, i;
@@ -3518,11 +3506,11 @@ static void communicate_with_listener_v1(struct tracecmd_msg_handle *msg_handle,
 	/* TODO, test for ipv4 */
 	if (page_size >= UDP_MAX_PACKET) {
 		warning("page size too big for UDP using TCP in live read");
-		use_tcp = 1;
+		instance->port_type = USE_TCP;
 		msg_handle->flags |= TRACECMD_MSG_FL_USE_TCP;
 	}
 
-	if (use_tcp) {
+	if (instance->port_type == USE_TCP) {
 		/* Send one option */
 		write(msg_handle->fd, "1", 2);
 		/* Size 4 */
@@ -3533,8 +3521,8 @@ static void communicate_with_listener_v1(struct tracecmd_msg_handle *msg_handle,
 		/* No options */
 		write(msg_handle->fd, "0", 2);
 
-	*client_ports = malloc(local_cpu_count * sizeof(*client_ports));
-	if (!*client_ports)
+	client_ports = malloc(local_cpu_count * sizeof(*client_ports));
+	if (!client_ports)
 		die("Failed to allocate client ports for %d cpus", local_cpu_count);
 
 	/*
@@ -3552,8 +3540,10 @@ static void communicate_with_listener_v1(struct tracecmd_msg_handle *msg_handle,
 		if (i == BUFSIZ)
 			die("read bad port number");
 		buf[i] = 0;
-		(*client_ports)[cpu] = atoi(buf);
+		client_ports[cpu] = atoi(buf);
 	}
+
+	instance->client_ports = client_ports;
 }
 
 static void communicate_with_listener_v3(struct tracecmd_msg_handle *msg_handle,
@@ -3610,54 +3600,86 @@ static void check_protocol_version(struct tracecmd_msg_handle *msg_handle)
 	}
 }
 
-static struct tracecmd_msg_handle *setup_network(struct buffer_instance *instance)
+static int connect_vsock(char *vhost)
 {
-	struct tracecmd_msg_handle *msg_handle = NULL;
-	struct addrinfo hints;
-	struct addrinfo *result, *rp;
-	int sfd, s;
+	char *cid;
+	char *port;
+	char *p;
+	int sd;
+
+	host = strdup(vhost);
+	if (!host)
+		die("alloctating server");
+
+	cid = strtok_r(host, ":", &p);
+	port = strtok_r(NULL, "", &p);
+
+	if (!port)
+		die("vsocket must have format of 'CID:PORT'");
+
+	sd = trace_vsock_open(atoi(cid), atoi(port));
+
+	return sd;
+}
+
+static int connect_ip(char *thost)
+{
+	struct addrinfo *result;
+	int sfd;
 	char *server;
 	char *port;
 	char *p;
 
-	if (!strchr(host, ':')) {
+	if (!strchr(thost, ':')) {
 		server = strdup("localhost");
 		if (!server)
 			die("alloctating server");
-		port = host;
+		port = thost;
 		host = server;
 	} else {
-		host = strdup(host);
+		host = strdup(thost);
 		if (!host)
 			die("alloctating server");
 		server = strtok_r(host, ":", &p);
 		port = strtok_r(NULL, ":", &p);
 	}
 
-	memset(&hints, 0, sizeof(hints));
-	hints.ai_family = AF_UNSPEC;
-	hints.ai_socktype = SOCK_STREAM;
+	result = do_getaddrinfo(server, atoi(port), USE_TCP);
+	if (!result)
+		die("getaddrinfo: %s", gai_err);
 
-again:
-	s = getaddrinfo(server, port, &hints, &result);
-	if (s != 0)
-		die("getaddrinfo: %s", gai_strerror(s));
-
-	for (rp = result; rp != NULL; rp = rp->ai_next) {
-		sfd = socket(rp->ai_family, rp->ai_socktype,
-			     rp->ai_protocol);
-		if (sfd == -1)
-			continue;
-
-		if (connect(sfd, rp->ai_addr, rp->ai_addrlen) != -1)
-			break;
-		close(sfd);
-	}
-
-	if (!rp)
-		die("Can not connect to %s:%s", server, port);
+	sfd = connect_addr(result);
 
 	freeaddrinfo(result);
+
+	if (sfd < 0)
+		die("Can not connect to %s:%s", server, port);
+
+	return sfd;
+}
+
+static struct tracecmd_msg_handle *setup_network(struct buffer_instance *instance)
+{
+	struct tracecmd_msg_handle *msg_handle = NULL;
+	enum port_type type = instance->port_type;
+	char *thost = strdup(host);
+	int sfd;
+
+	if (!thost)
+		die("Failed to allocate host");
+again:
+	switch (type) {
+	case USE_VSOCK:
+		sfd = connect_vsock(thost);
+		break;
+	default:
+		sfd = connect_ip(thost);
+	}
+
+	if (sfd < 0) {
+		free(thost);
+		return NULL;
+	}
 
 	if (msg_handle) {
 		msg_handle->fd = sfd;
@@ -3670,22 +3692,33 @@ again:
 		msg_handle->version = V3_PROTOCOL;
 	}
 
-	if (use_tcp)
+	switch (type) {
+	case USE_TCP:
 		msg_handle->flags |= TRACECMD_MSG_FL_USE_TCP;
+		break;
+	case USE_VSOCK:
+		msg_handle->flags |= TRACECMD_MSG_FL_USE_VSOCK;
+		break;
+	default:
+		break;
+	}
 
 	if (msg_handle->version == V3_PROTOCOL) {
 		check_protocol_version(msg_handle);
 		if (msg_handle->version == V1_PROTOCOL) {
 			/* reconnect to the server for using the v1 protocol */
 			close(sfd);
+			free(host);
+			host = NULL;
 			goto again;
 		}
 		communicate_with_listener_v3(msg_handle, &instance->client_ports);
 	}
 
 	if (msg_handle->version == V1_PROTOCOL)
-		communicate_with_listener_v1(msg_handle, &instance->client_ports);
+		communicate_with_listener_v1(msg_handle, instance);
 
+	free(thost);
 	return msg_handle;
 }
 
@@ -3728,6 +3761,8 @@ setup_connection(struct buffer_instance *instance, struct common_record_context 
 	int ret;
 
 	msg_handle = setup_network(instance);
+	if (!msg_handle)
+		die("Failed to make connection");
 
 	/* Now create the handle through this socket */
 	if (msg_handle->version == V3_PROTOCOL) {
@@ -3752,18 +3787,17 @@ setup_connection(struct buffer_instance *instance, struct common_record_context 
 		if (ret)
 			goto error;
 	} else {
+		/*
+		 * V3 can handle compression, but V1 can not.
+		 * Set the file version back to 6.
+		 */
+		ctx->file_version = FILE_VERSION_MIN;
+		ctx->compression = false;
 		network_handle = tracecmd_output_create_fd(msg_handle->fd);
 		if (!network_handle)
 			goto error;
 		if (tracecmd_output_set_version(network_handle, ctx->file_version))
 			goto error;
-
-		if (ctx->compression) {
-			if (tracecmd_output_set_compression(network_handle, ctx->compression))
-				goto error;
-		} else if (ctx->file_version >= FILE_VERSION_COMPRESSION) {
-			tracecmd_output_set_compression(network_handle, "any");
-		}
 
 		if (tracecmd_output_write_headers(network_handle, listed_events))
 			goto error;
@@ -3815,187 +3849,34 @@ static int open_guest_fifos(const char *guest, int **fds)
 	return i;
 }
 
-struct trace_mapping {
-	struct tep_event		*kvm_entry;
-	struct tep_format_field		*vcpu_id;
-	struct tep_format_field		*common_pid;
-	int				*pids;
-	int				*map;
-	int				max_cpus;
-};
-
-static void start_mapping_vcpus(struct trace_guest *guest)
-{
-	char *pids = NULL;
-	char *t;
-	int len = 0;
-	int s;
-	int i;
-
-	if (!guest->task_pids)
-		return;
-
-	guest->instance = tracefs_instance_create("map_guest_pids");
-	if (!guest->instance)
-		return;
-
-	for (i = 0; guest->task_pids[i] >= 0; i++) {
-		s = snprintf(NULL, 0, "%d ", guest->task_pids[i]);
-		t = realloc(pids, len + s + 1);
-		if (!t) {
-			free(pids);
-			pids = NULL;
-			break;
-		}
-		pids = t;
-		sprintf(pids + len, "%d ", guest->task_pids[i]);
-		len += s;
-	}
-	if (pids) {
-		tracefs_instance_file_write(guest->instance, "set_event_pid", pids);
-		free(pids);
-	}
-	tracefs_instance_file_write(guest->instance, "events/kvm/kvm_entry/enable", "1");
-}
-
-static int map_vcpus(struct tep_event *event, struct tep_record *record,
-		     int cpu, void *context)
-{
-	struct trace_mapping *tmap = context;
-	unsigned long long val;
-	int type;
-	int pid;
-	int ret;
-	int i;
-
-	/* Do we have junk in the buffer? */
-	type = tep_data_type(event->tep, record);
-	if (type != tmap->kvm_entry->id)
-		return 0;
-
-	ret = tep_read_number_field(tmap->common_pid, record->data, &val);
-	if (ret < 0)
-		return 0;
-	pid = (int)val;
-
-	for (i = 0; tmap->pids[i] >= 0; i++) {
-		if (pid == tmap->pids[i])
-			break;
-	}
-	/* Is this thread one we care about ? */
-	if (tmap->pids[i] < 0)
-		return 0;
-
-	ret = tep_read_number_field(tmap->vcpu_id, record->data, &val);
-	if (ret < 0)
-		return 0;
-
-	cpu = (int)val;
-
-	/* Sanity check, warn? */
-	if (cpu >= tmap->max_cpus)
-		return 0;
-
-	/* Already have this one? Should we check if it is the same? */
-	if (tmap->map[cpu] >= 0)
-		return 0;
-
-	tmap->map[cpu] = pid;
-
-	/* Did we get them all */
-	for (i = 0; i < tmap->max_cpus; i++) {
-		if (tmap->map[i] < 0)
-			break;
-	}
-
-	return i == tmap->max_cpus;
-}
-
-static void stop_mapping_vcpus(struct buffer_instance *instance,
-			       struct trace_guest *guest)
-{
-	struct trace_mapping tmap = { };
-	struct tep_handle *tep;
-	const char *systems[] = { "kvm", NULL };
-	int i;
-
-	if (!guest->instance)
-		return;
-
-	tmap.pids = guest->task_pids;
-	tmap.max_cpus = instance->cpu_count;
-
-	tmap.map = malloc(sizeof(*tmap.map) * tmap.max_cpus);
-	if (!tmap.map)
-		return;
-
-	for (i = 0; i < tmap.max_cpus; i++)
-		tmap.map[i] = -1;
-
-	tracefs_instance_file_write(guest->instance, "events/kvm/kvm_entry/enable", "0");
-
-	tep = tracefs_local_events_system(NULL, systems);
-	if (!tep)
-		goto out;
-
-	tmap.kvm_entry = tep_find_event_by_name(tep, "kvm", "kvm_entry");
-	if (!tmap.kvm_entry)
-		goto out_free;
-
-	tmap.vcpu_id = tep_find_field(tmap.kvm_entry, "vcpu_id");
-	if (!tmap.vcpu_id)
-		goto out_free;
-
-	tmap.common_pid = tep_find_any_field(tmap.kvm_entry, "common_pid");
-	if (!tmap.common_pid)
-		goto out_free;
-
-	tracefs_iterate_raw_events(tep, guest->instance, NULL, 0, map_vcpus, &tmap);
-
-	for (i = 0; i < tmap.max_cpus; i++) {
-		if (tmap.map[i] < 0)
-			break;
-	}
-	/* We found all the mapped CPUs */
-	if (i == tmap.max_cpus) {
-		guest->cpu_pid = tmap.map;
-		guest->cpu_max = tmap.max_cpus;
-		tmap.map = NULL;
-	}
-
- out_free:
-	tep_free(tep);
- out:
-	free(tmap.map);
-	tracefs_instance_destroy(guest->instance);
-	tracefs_instance_free(guest->instance);
-}
-
 static int host_tsync(struct common_record_context *ctx,
 		      struct buffer_instance *instance,
 		      unsigned int tsync_port, char *proto)
 {
-	struct trace_guest *guest;
+	int guest_id = -1;
+	int fd;
 
 	if (!proto)
 		return -1;
-	guest = trace_get_guest(instance->cid, NULL);
-	if (guest == NULL)
-		return -1;
 
-	start_mapping_vcpus(guest);
+	if (is_network(instance)) {
+		fd = connect_port(instance->name, tsync_port,
+				  instance->port_type);
+	} else {
+		guest_id = instance->cid;
+		fd = trace_vsock_open(instance->cid, tsync_port);
+	}
 
-	instance->tsync = tracecmd_tsync_with_guest(top_instance.trace_id,
-						    instance->tsync_loop_interval,
-						    instance->cid, tsync_port,
-						    guest->pid, instance->cpu_count,
-						    proto, ctx->clock);
-	stop_mapping_vcpus(instance, guest);
-
-	if (!instance->tsync)
-		return -1;
-
-	return 0;
+	if (is_proxy(instance)) {
+		instance->tsync = trace_tsync_as_guest(fd, proto, ctx->clock,
+						       guest_id, -1);
+	} else {
+		instance->tsync = trace_tsync_as_host(fd, top_instance.trace_id,
+						      instance->tsync_loop_interval,
+						      guest_id, instance->cpu_count,
+						      proto, ctx->clock);
+	}
+	return instance->tsync ? 0 : -1;
 }
 
 static void connect_to_agent(struct common_record_context *ctx,
@@ -4004,21 +3885,36 @@ static void connect_to_agent(struct common_record_context *ctx,
 	struct tracecmd_tsync_protos *protos = NULL;
 	int sd, ret, nr_fifos, nr_cpus, page_size;
 	struct tracecmd_msg_handle *msg_handle;
+	enum tracecmd_time_sync_role role;
 	char *tsync_protos_reply = NULL;
 	unsigned int tsync_port = 0;
 	unsigned int *ports;
 	int i, *fds = NULL;
 	bool use_fifos = false;
+	int siblings = 0;
 
 	if (!no_fifos) {
 		nr_fifos = open_guest_fifos(instance->name, &fds);
 		use_fifos = nr_fifos > 0;
 	}
 
-	sd = trace_open_vsock(instance->cid, instance->port);
-	if (sd < 0)
-		die("Failed to connect to vsocket @%u:%u",
-		    instance->cid, instance->port);
+	if (ctx->instance->result) {
+		role = TRACECMD_TIME_SYNC_ROLE_CLIENT;
+		sd = connect_addr(ctx->instance->result);
+		if (sd < 0)
+			die("Failed to connect to host %s:%u",
+			    instance->name, instance->port);
+	} else {
+		/* If connecting to a proxy, then this is the guest */
+		if (is_proxy(ctx->instance))
+			role = TRACECMD_TIME_SYNC_ROLE_GUEST;
+		else
+			role = TRACECMD_TIME_SYNC_ROLE_HOST;
+		sd = trace_vsock_open(instance->cid, instance->port);
+		if (sd < 0)
+			die("Failed to connect to vsocket @%u:%u",
+			    instance->cid, instance->port);
+	}
 
 	msg_handle = tracecmd_msg_handle_alloc(sd, 0);
 	if (!msg_handle)
@@ -4028,14 +3924,21 @@ static void connect_to_agent(struct common_record_context *ctx,
 		instance->clock = tracefs_get_clock(NULL);
 
 	if (instance->tsync_loop_interval >= 0)
-		tracecmd_tsync_proto_getall(&protos, instance->clock,
-					    TRACECMD_TIME_SYNC_ROLE_HOST);
+		tracecmd_tsync_proto_getall(&protos, instance->clock, role);
 
-	ret = tracecmd_msg_send_trace_req(msg_handle, instance->argc,
-					  instance->argv, use_fifos,
-					  top_instance.trace_id, protos);
+	if (is_proxy(instance))
+		ret = tracecmd_msg_send_trace_proxy(msg_handle, instance->argc,
+						    instance->argv, use_fifos,
+						    top_instance.trace_id, protos,
+						    tracecmd_count_cpus(),
+						    siblings);
+	else
+		ret = tracecmd_msg_send_trace_req(msg_handle, instance->argc,
+						  instance->argv, use_fifos,
+						  top_instance.trace_id, protos);
 	if (ret < 0)
-		die("Failed to send trace request");
+		die("Failed to send trace %s",
+		    is_proxy(instance) ? "proxy" : "request");
 
 	if (protos) {
 		free(protos->names);
@@ -4104,7 +4007,15 @@ static void setup_guest(struct buffer_instance *instance)
 	/* Start reading tracing metadata */
 	if (tracecmd_msg_read_data(msg_handle, fd))
 		die("Failed receiving metadata");
-	close(fd);
+
+	/*
+	 * If connected to a proxy, then it still needs to send
+	 * the host / guest timings from its POV.
+	 */
+	if (is_proxy(instance))
+		instance->proxy_fd = fd;
+	else
+		close(fd);
 }
 
 static void setup_agent(struct buffer_instance *instance,
@@ -4117,13 +4028,18 @@ static void setup_agent(struct buffer_instance *instance,
 	tracecmd_write_cmdlines(network_handle);
 	tracecmd_write_cpus(network_handle, instance->cpu_count);
 	tracecmd_write_buffer_info(network_handle);
-	tracecmd_write_options(network_handle);
-	tracecmd_write_meta_strings(network_handle);
-	tracecmd_msg_finish_sending_data(instance->msg_handle);
+	if (instance->msg_handle->flags & TRACECMD_MSG_FL_PROXY) {
+		tracecmd_prepare_options(network_handle, 0, SEEK_CUR);
+		tracecmd_msg_flush_data(instance->msg_handle);
+	} else {
+		tracecmd_write_options(network_handle);
+		tracecmd_write_meta_strings(network_handle);
+		tracecmd_msg_finish_sending_data(instance->msg_handle);
+	}
 	instance->network_handle = network_handle;
 }
 
-void start_threads(enum trace_type type, struct common_record_context *ctx)
+static void start_threads(enum trace_type type, struct common_record_context *ctx)
 {
 	struct buffer_instance *instance;
 	int total_cpu_count = 0;
@@ -4145,6 +4061,9 @@ void start_threads(enum trace_type type, struct common_record_context *ctx)
 	for_all_instances(instance) {
 		int *brass = NULL;
 		int x, pid;
+
+		/* May be set by setup_guest() but all others is -1 */
+		instance->proxy_fd = -1;
 
 		if (is_agent(instance)) {
 			setup_agent(instance, ctx);
@@ -4231,50 +4150,6 @@ static void append_buffer(struct tracecmd_output *handle,
 			delete_temp_file(instance, i);
 		put_temp_file(temp_files[i]);
 	}
-}
-
-static void
-add_guest_info(struct tracecmd_output *handle, struct buffer_instance *instance)
-{
-	struct trace_guest *guest = trace_get_guest(instance->cid, NULL);
-	char *buf, *p;
-	int size;
-	int pid;
-	int i;
-
-	if (!guest)
-		return;
-
-	size = strlen(guest->name) + 1;
-	size += sizeof(long long);	/* trace_id */
-	size += sizeof(int);		/* cpu count */
-	size += instance->cpu_count * 2 * sizeof(int);	/* cpu,pid pair */
-
-	buf = calloc(1, size);
-	if (!buf)
-		return;
-	p = buf;
-	strcpy(p, guest->name);
-	p += strlen(guest->name) + 1;
-
-	memcpy(p, &instance->trace_id, sizeof(long long));
-	p += sizeof(long long);
-
-	memcpy(p, &instance->cpu_count, sizeof(int));
-	p += sizeof(int);
-	for (i = 0; i < instance->cpu_count; i++) {
-		if (i < guest->cpu_max)
-			pid = guest->cpu_pid[i];
-		else
-			pid = -1;
-		memcpy(p, &i, sizeof(int));
-		p += sizeof(int);
-		memcpy(p, &pid, sizeof(int));
-		p += sizeof(int);
-	}
-
-	tracecmd_add_option(handle, TRACECMD_OPTION_GUEST, size, buf);
-	free(buf);
 }
 
 static void
@@ -4416,6 +4291,7 @@ enum {
 	DATA_FL_DATE		= 1,
 	DATA_FL_OFFSET		= 2,
 	DATA_FL_GUEST		= 4,
+	DATA_FL_PROXY		= 8,
 };
 
 static void add_options(struct tracecmd_output *handle, struct common_record_context *ctx)
@@ -4517,15 +4393,18 @@ static void record_data(struct common_record_context *ctx)
 {
 	struct tracecmd_output *handle;
 	struct buffer_instance *instance;
+	bool have_proxy = false;
 	bool local = false;
 	int max_cpu_count = local_cpu_count;
 	char **temp_files;
 	int i;
 
 	for_all_instances(instance) {
-		if (is_guest(instance))
+		if (is_guest(instance)) {
 			write_guest_file(instance);
-		else if (host && instance->msg_handle)
+			if (is_proxy(instance))
+				have_proxy = true;
+		} else if (host && instance->msg_handle)
 			finish_network(instance->msg_handle);
 		else
 			local = true;
@@ -4574,6 +4453,22 @@ static void record_data(struct common_record_context *ctx)
 
 		add_options(handle, ctx);
 
+		/*
+		 * If we connected to a proxy, then it will now send us
+		 * the tsync data for our file.
+		 */
+		if (have_proxy) {
+			for_all_instances(instance) {
+				if (!is_proxy(instance))
+					continue;
+				/* Tell proxy we are ready for the rest */
+				tracecmd_msg_cont(instance->msg_handle);
+				tracecmd_msg_read_options(instance->msg_handle, handle);
+				tracecmd_msg_wait_close_resp(instance->msg_handle);
+				tracecmd_msg_handle_close(instance->msg_handle);
+			}
+		}
+
 		/* Only record the top instance under TRACECMD_OPTION_CPUSTAT*/
 		if (!no_top_instance() && !top_instance.msg_handle) {
 			struct trace_seq *s = top_instance.s_save;
@@ -4607,7 +4502,7 @@ static void record_data(struct common_record_context *ctx)
 
 		for_all_instances(instance) {
 			if (is_guest(instance))
-				add_guest_info(handle, instance);
+				trace_add_guest_info(handle, instance);
 		}
 
 		if (ctx->tsc2nsec.mult) {
@@ -5806,6 +5701,7 @@ enum {
 	OPT_cmdlines_size	= 258,
 	OPT_poll		= 259,
 	OPT_name		= 260,
+	OPT_proxy		= 261
 };
 
 void trace_stop(int argc, char **argv)
@@ -6182,11 +6078,13 @@ static void parse_record_options(int argc,
 	const char *option;
 	struct event_list *event = NULL;
 	struct event_list *last_event = NULL;
+	struct addrinfo *result;
 	char *pids;
 	char *pid;
 	char *sav;
 	int name_counter = 0;
 	int negative = 0;
+	bool is_proxy = false;
 	struct buffer_instance *instance, *del_list = NULL;
 	int do_children = 0;
 	int fpids_count = 0;
@@ -6227,13 +6125,14 @@ static void parse_record_options(int argc,
 			{"verbose", optional_argument, NULL, OPT_verbose},
 			{"compression", required_argument, NULL, OPT_compression},
 			{"file-version", required_argument, NULL, OPT_file_ver},
+			{"proxy", required_argument, NULL, OPT_proxy},
 			{NULL, 0, NULL, 0}
 		};
 
 		if (IS_EXTRACT(ctx))
 			opts = "+haf:Fp:co:O:sr:g:l:n:P:N:tb:B:ksiT";
 		else
-			opts = "+hae:f:FA:p:cC:dDGo:O:s:r:vg:l:n:P:N:tb:R:B:ksSiTm:M:H:q";
+			opts = "+hae:f:FA:p:cC:dDGo:O:s:r:V:vg:l:n:P:N:tb:R:B:ksSiTm:M:H:q";
 		c = getopt_long (argc-1, argv+1, opts, long_options, &option_index);
 		if (c == -1)
 			break;
@@ -6242,7 +6141,8 @@ static void parse_record_options(int argc,
 		 * If the current instance is to record a guest, then save
 		 * all the arguments for this instance.
 		 */
-		if (c != 'B' && c != 'A' && c != OPT_name && is_guest(ctx->instance)) {
+		if (c != 'B' && (c != 'A' || is_proxy) && c != OPT_name &&
+		    is_guest(ctx->instance)) {
 			add_arg(ctx->instance, c, opts, long_options, optarg);
 			if (c == 'C')
 				ctx->instance->flags |= BUFFER_FL_HAS_CLOCK;
@@ -6314,15 +6214,19 @@ static void parse_record_options(int argc,
 				die("Failed to allocate name");
 			break;
 
+		case OPT_proxy:
+			is_proxy = true;
+			/* fall through */
 		case 'A': {
 			char *name = NULL;
 			int cid = -1, port = -1;
 
 			if (!IS_RECORD(ctx))
-				die("-A is only allowed for record operations");
+				die("%s is only allowed for record operations",
+				    is_proxy ? "--proxy" : "-A");
 
-			name = parse_guest_name(optarg, &cid, &port);
-			if (cid == -1)
+			name = parse_guest_name(optarg, &cid, &port, &result);
+			if (cid == -1 && !result)
 				die("guest %s not found", optarg);
 			if (port == -1)
 				port = TRACE_AGENT_DEFAULT_PORT;
@@ -6338,12 +6242,29 @@ static void parse_record_options(int argc,
 				die("Failed to allocate guest name");
 
 			ctx->instance = allocate_instance(name);
+			if (!ctx->instance)
+				die("Failed to allocate instance");
+
+			if (result) {
+				ctx->instance->flags |= BUFFER_FL_NETWORK;
+				ctx->instance->port_type = USE_TCP;
+			}
+
+			if (is_proxy)
+				ctx->instance->flags |= BUFFER_FL_PROXY;
+
 			ctx->instance->flags |= BUFFER_FL_GUEST;
+			ctx->instance->result = result;
 			ctx->instance->cid = cid;
 			ctx->instance->port = port;
 			ctx->instance->name = name;
 			add_instance(ctx->instance, 0);
 			ctx->data_flags |= DATA_FL_GUEST;
+
+			/* Do not send a clock to a proxy */
+			if (is_proxy)
+				ctx->instance->flags |= BUFFER_FL_HAS_CLOCK;
+
 			break;
 		}
 		case 'F':
@@ -6525,6 +6446,17 @@ static void parse_record_options(int argc,
 				die("-N incompatible with -o");
 			host = optarg;
 			break;
+		case 'V':
+			cmd_check_die(ctx, CMD_set, *(argv+1), "-V");
+			if (!IS_RECORD(ctx))
+				die("-V only available with record");
+			if (IS_RECORD_AGENT(ctx))
+				die("-V incompatible with agent recording");
+			if (ctx->output)
+				die("-V incompatible with -o");
+			host = optarg;
+			ctx->instance->port_type = USE_VSOCK;
+			break;
 		case 'm':
 			if (max_kb)
 				die("-m can only be specified once");
@@ -6541,13 +6473,15 @@ static void parse_record_options(int argc,
 			if (IS_EXTRACT(ctx))
 				ctx->topt = 1; /* Extract top instance also */
 			else
-				use_tcp = 1;
+				ctx->instance->port_type = USE_TCP;
 			break;
 		case 'b':
 			check_instance_die(ctx->instance, "-b");
 			ctx->instance->buffer_size = atoi(optarg);
 			break;
 		case 'B':
+			/* Turn off proxy for the next options */
+			is_proxy = false;
 			ctx->instance = allocate_instance(optarg);
 			if (!ctx->instance)
 				die("Failed to create instance");
@@ -6797,6 +6731,16 @@ static void finalize_record_trace(struct common_record_context *ctx)
 		if (instance->flags & BUFFER_FL_KEEP)
 			write_tracing_on(instance,
 					 instance->tracing_on_init_val);
+		if (is_proxy_server(instance) && instance->network_handle) {
+			/* Now wait for the recorder to be ready for us to send more */
+			tracecmd_msg_wait(ctx->instance->msg_handle);
+			if (ctx->tsc2nsec.mult)
+				add_tsc2nsec(ctx->instance->network_handle, &ctx->tsc2nsec);
+			tracecmd_write_guest_time_shift(ctx->instance->network_handle,
+							ctx->instance->tsync);
+			tracecmd_msg_send_options(ctx->instance->msg_handle,
+						  ctx->instance->network_handle);
+		}
 		if (is_agent(instance)) {
 			tracecmd_msg_send_close_resp_msg(instance->msg_handle);
 			tracecmd_output_close(instance->network_handle);
@@ -6909,7 +6853,7 @@ static void record_trace(int argc, char **argv,
 	if (!ctx->output)
 		ctx->output = DEFAULT_INPUT_FILE;
 
-	if (ctx->data_flags & DATA_FL_GUEST)
+	if (ctx->data_flags & (DATA_FL_GUEST | DATA_FL_PROXY))
 		set_tsync_params(ctx);
 
 	make_instances();
@@ -7031,6 +6975,16 @@ static void record_trace(int argc, char **argv,
 
 	if (!latency)
 		wait_threads();
+
+	if (is_proxy_server(ctx->instance) && ctx->instance->network_handle) {
+		tracecmd_tsync_with_guest_stop(ctx->instance->tsync);
+		trace_add_guest_info(ctx->instance->network_handle, ctx->instance);
+		if (ctx->tsc2nsec.mult)
+			add_tsc2nsec(ctx->instance->network_handle, &ctx->tsc2nsec);
+		tracecmd_write_options(ctx->instance->network_handle);
+		tracecmd_write_meta_strings(ctx->instance->network_handle);
+		tracecmd_msg_finish_sending_data(ctx->instance->msg_handle);
+	}
 
 	if (IS_RECORD(ctx)) {
 		record_data(ctx);
@@ -7186,11 +7140,30 @@ void trace_record(int argc, char **argv)
 	exit(0);
 }
 
+/**
+ * trace_record_agent - record command running from the agent
+ * @msg_handle: The handle to communicate with the peer
+ * @cpus: The number of CPUs the agent has to record
+ * @fds: The array of file descriptors for the CPUs
+ * @argc: The number of arguments to pass to the record session
+ * @argv: The arguments to pass to the record session
+ * @use_fifos: True if fifos are used instead of sockets.
+ * @trace_id: The agent's trace_id
+ * @rcid: Remote cid if the agent is a proxy, negative otherwise.
+ * @host: Set if this is an IP connection and not a vsocket one
+ *
+ * This is used to enable tracing via the record command just
+ * like trace-cmd record, but it is being done via the agent
+ * and all the data is being transfered to the peer that is
+ * connected on the other end of the sockets.
+ *
+ *  Returns zero on success, negative otherwise.
+ */
 int trace_record_agent(struct tracecmd_msg_handle *msg_handle,
 		       int cpus, int *fds,
 		       int argc, char **argv,
-		       bool use_fifos,
-		       unsigned long long trace_id)
+		       bool use_fifos, struct tracecmd_time_sync *tsync,
+		       unsigned long long trace_id, int rcid, const char *host)
 {
 	struct common_record_context ctx;
 	char **argv_plus;
@@ -7218,7 +7191,12 @@ int trace_record_agent(struct tracecmd_msg_handle *msg_handle,
 	ctx.instance->fds = fds;
 	ctx.instance->use_fifos = use_fifos;
 	ctx.instance->flags |= BUFFER_FL_AGENT;
+	if (rcid >= 0)
+		ctx.data_flags |= DATA_FL_PROXY;
 	ctx.instance->msg_handle = msg_handle;
+	ctx.instance->host = host;
+	ctx.instance->tsync = tsync;
+	ctx.instance->cid = rcid;
 	msg_handle->version = V3_PROTOCOL;
 	top_instance.trace_id = trace_id;
 	record_trace(argc, argv, &ctx);

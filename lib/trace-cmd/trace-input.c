@@ -1442,9 +1442,10 @@ static void *allocate_page_map(struct tracecmd_input *handle,
 		map_size -= map_offset + map_size -
 			(cpu_data->file_offset + cpu_data->file_size);
 
-	if (cpu_data->compress.fd >= 0)
+	if (cpu_data->compress.fd >= 0) {
+		map_offset -= cpu_data->file_offset;
 		fd = cpu_data->compress.fd;
-	else
+	} else
 		fd = handle->fd;
  again:
 	page_map->size = map_size;
@@ -2461,6 +2462,9 @@ tracecmd_read_data(struct tracecmd_input *handle, int cpu)
 {
 	struct tep_record *record;
 
+	if (cpu >= handle->cpus)
+		return NULL;
+
 	record = tracecmd_peek_data(handle, cpu);
 	handle->cpu_data[cpu].next = NULL;
 	if (record) {
@@ -3435,6 +3439,7 @@ static int handle_options(struct tracecmd_input *handle)
 				goto out;
 			break;
 		case TRACECMD_OPTION_TRACECLOCK:
+			tracecmd_parse_trace_clock(handle, buf, size);
 			if (!handle->ts2secs)
 				handle->use_trace_clock = true;
 			break;
@@ -3863,7 +3868,8 @@ static void extract_trace_clock(struct tracecmd_input *handle, char *line)
 	/* Clear usecs if not one of the specified clocks */
 	if (strcmp(clock, "local") && strcmp(clock, "global") &&
 	    strcmp(clock, "uptime") && strcmp(clock, "perf") &&
-	    strncmp(clock, "mono", 4) && strcmp(clock, TSCNSEC_CLOCK))
+	    strncmp(clock, "mono", 4) && strcmp(clock, TSCNSEC_CLOCK) &&
+	    strcmp(clock, "tai"))
 		handle->flags &= ~TRACECMD_FL_IN_USECS;
 }
 
@@ -4273,7 +4279,10 @@ struct tracecmd_input *tracecmd_alloc_fd(int fd, int flags)
 		if (!zver)
 			goto failed_read;
 
-		if (strcmp(zname, "none")) {
+		if (strcmp(zname, "none") == 0) {
+			handle->read_zpage = false;
+			handle->flags &= ~TRACECMD_FL_COMPRESSION;
+		} else {
 			handle->compress = tracecmd_compress_alloc(zname, zver,
 								   handle->fd,
 								   handle->pevent, NULL);

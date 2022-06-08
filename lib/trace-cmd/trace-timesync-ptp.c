@@ -8,7 +8,6 @@
 #include <stdlib.h>
 #include <unistd.h>
 #include <arpa/inet.h>
-#include <linux/vm_sockets.h>
 #include <sys/types.h>
 #include <linux/types.h>
 #include <time.h>
@@ -35,7 +34,7 @@ typedef __s64 s64;
 #define PTP_SYNC_PKT_END	5
 
 /* print time sync debug messages */
-#define TSYNC_DEBUG
+/* #define TSYNC_DEBUG */
 
 struct ptp_clock_sync {
 	struct tep_handle	*tep;
@@ -100,8 +99,8 @@ struct ptp_markers_context {
 };
 
 struct ptp_marker_buf {
-	int local_cid;
-	int remote_cid;
+	int local_id;
+	int remote_id;
 	int count;
 	int packet_id;
 } __packed;
@@ -163,7 +162,7 @@ static int ptp_clock_sync_init(struct tracecmd_time_sync *tsync)
 		char buff[256];
 		int res_fd;
 
-		sprintf(buff, "res-cid%d.txt", clock_context->remote_cid);
+		sprintf(buff, "res-id%d.txt", clock_context->remote_id);
 
 		res_fd = open(buff, O_CREAT|O_WRONLY|O_TRUNC, 0644);
 		if (res_fd > 0)
@@ -247,8 +246,8 @@ static int ptp_marker_find(struct tep_event *event, struct tep_record *record,
 		return 0;
 	if (record->size >= (ctx->ptp->id->offset + sizeof(struct ptp_marker))) {
 		marker = (struct ptp_marker *)(record->data + ctx->ptp->id->offset);
-		if (marker->data.local_cid == ctx->clock->local_cid &&
-		    marker->data.remote_cid == ctx->clock->remote_cid &&
+		if (marker->data.local_id == ctx->clock->local_id &&
+		    marker->data.remote_id == ctx->clock->remote_id &&
 		    marker->series_id == ctx->ptp->series_id &&
 		    marker->data.count)
 			ptp_probe_store(ctx, marker, record->ts);
@@ -460,8 +459,8 @@ static int ptp_clock_client(struct tracecmd_time_sync *tsync,
 	ret = tracecmd_msg_send_time_sync(tsync->msg_handle, PTP_NAME,
 					  PTP_SYNC_PKT_START, sizeof(start),
 					  (char *)&start);
-	marker.data.local_cid = clock_context->local_cid;
-	marker.data.remote_cid = clock_context->remote_cid;
+	marker.data.local_id = clock_context->local_id;
+	marker.data.remote_id = clock_context->remote_id;
 	marker.series_id = ntohl(start.series_id);
 	marker.data.packet_id = 'r';
 	ptp->series_id = marker.series_id;
@@ -566,8 +565,8 @@ static int ptp_clock_server(struct tracecmd_time_sync *tsync,
 	tracefs_instance_file_write(clock_context->instance, "trace", "\0");
 
 	ptp->series_id++;
-	marker.data.local_cid = clock_context->local_cid;
-	marker.data.remote_cid = clock_context->remote_cid;
+	marker.data.local_id = clock_context->local_id;
+	marker.data.remote_id = clock_context->remote_id;
 	marker.series_id = ptp->series_id;
 	msg = (char *)&msg_ret;
 	size = sizeof(msg_ret);
@@ -627,7 +626,7 @@ static int ptp_clock_server(struct tracecmd_time_sync *tsync,
 		char buff[256];
 		int res_fd;
 
-		sprintf(buff, "res-cid%d.txt", clock_context->remote_cid);
+		sprintf(buff, "res-id%d.txt", clock_context->remote_id);
 
 		res_fd = open(buff, O_WRONLY|O_APPEND, 0644);
 		if (res_fd > 0) {
@@ -681,8 +680,8 @@ static int ptp_clock_sync_calc(struct tracecmd_time_sync *tsync,
 		ptp = (struct ptp_clock_sync *)clock_context->proto_data;
 		if (ptp->debug_fd > 0)
 			close(ptp->debug_fd);
-		sprintf(buff, "s-cid%d_%d.txt",
-				clock_context->remote_cid, ptp->series_id+1);
+		sprintf(buff, "s-id%d_%d.txt",
+				clock_context->remote_id, ptp->series_id+1);
 		ptp->debug_fd = open(buff, O_CREAT|O_WRONLY|O_TRUNC, 0644);
 	}
 #endif
@@ -703,7 +702,9 @@ int ptp_clock_sync_register(void)
 {
 	return tracecmd_tsync_proto_register(PTP_NAME, PTP_ACCURACY,
 					     TRACECMD_TIME_SYNC_ROLE_GUEST |
-					     TRACECMD_TIME_SYNC_ROLE_HOST,
+					     TRACECMD_TIME_SYNC_ROLE_HOST |
+					     TRACECMD_TIME_SYNC_ROLE_CLIENT |
+					     TRACECMD_TIME_SYNC_ROLE_SERVER,
 					     0, TRACECMD_TSYNC_FLAG_INTERPOLATE,
 					     ptp_clock_sync_init,
 					     ptp_clock_sync_free,

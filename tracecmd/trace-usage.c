@@ -44,6 +44,7 @@ static struct usage_help usage_help[] = {
 		"          -s sleep interval between recording (in usecs) [default: 1000]\n"
 		"          -S used with --profile, to enable only events in command line\n"
 		"          -N host:port to connect to (see listen)\n"
+		"          -V cid:port to connect to via vsocket (see listen)\n"
 		"          -t used with -N, forces use of tcp in live trace\n"
 		"          -b change kernel buffersize (in kilobytes per CPU)\n"
 		"          -B create sub buffer and following events will be enabled here\n"
@@ -318,17 +319,20 @@ static struct usage_help usage_help[] = {
 		"          Creates a socket to listen for clients.\n"
 		"          -p port number to listen on.\n"
 		"          -D run in daemon mode.\n"
+		"          -V listen on a vsocket instead.\n"
 		"          -o file name to use for clients.\n"
 		"          -d directory to store client files.\n"
 		"          -l logfile to write messages to.\n"
 		"          --verbose 'level' Set the desired log level\n"
 	},
-#ifdef VSOCK
 	{
 		"agent",
 		"listen on a vsocket for trace clients",
 		" %s agent -p port[-D]\n"
 		"          Creates a vsocket to listen for clients.\n"
+		"          -N Connect to IP via TCP instead of vsockets\n"
+		"             *** Insecure setting, only use on a trusted network ***\n"
+		"             ***   Only use if the client is totally trusted.    ***\n"
 		"          -p port number to listen on.\n"
 		"          -D run in daemon mode.\n"
 		"          --verbose 'level' Set the desired log level\n"
@@ -342,7 +346,6 @@ static struct usage_help usage_help[] = {
 		"          -g FIFOs group owner\n"
 		"          -a Attach FIFOs to guest VM config\n"
 	},
-#endif
 	{
 		"list",
 		"list the available events, plugins or options",

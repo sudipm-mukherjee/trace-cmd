@@ -22,6 +22,8 @@ struct tracecmd_time_sync {
 	void				*context;
 	int				guest_pid;
 	int				vcpu_count;
+	int				remote_id;
+	int				local_id;
 };
 
 struct clock_sync_offsets {
@@ -49,11 +51,9 @@ struct clock_sync_context {
 							 * calculated offsets per CPU
 							 */
 
-	/* Identifiers of local and remote time sync peers: cid and port */
-	unsigned int			local_cid;
-	unsigned int			local_port;
-	unsigned int			remote_cid;
-	unsigned int			remote_port;
+	/* Identifiers of local and remote time sync peers */
+	unsigned int			local_id;
+	unsigned int			remote_id;
 };
 
 int tracecmd_tsync_proto_register(const char *proto_name, int accuracy, int roles,
@@ -64,8 +64,15 @@ int tracecmd_tsync_proto_register(const char *proto_name, int accuracy, int role
 					      long long *, long long *, long long*,
 					      long long *, unsigned int));
 int tracecmd_tsync_proto_unregister(char *proto_name);
-
 int ptp_clock_sync_register(void);
+
+#ifdef VSOCK
 int kvm_clock_sync_register(void);
+#else
+static inline int kvm_clock_sync_register(void)
+{
+	return 0;
+}
+#endif
 
 #endif /* _TRACE_TSYNC_LOCAL_H */

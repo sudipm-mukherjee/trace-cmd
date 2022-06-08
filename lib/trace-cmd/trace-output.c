@@ -69,6 +69,7 @@ struct tracecmd_output {
 	unsigned long		strings_offs;
 
 	unsigned long long	options_start;
+	unsigned long long	options_next;
 	bool			big_endian;
 	bool			do_compress;
 	struct tracecmd_compression *compress;
@@ -1841,10 +1842,123 @@ static int write_options_v6(struct tracecmd_output *handle)
 	return 0;
 }
 
+static int update_options_start(struct tracecmd_output *handle, off64_t offset)
+{
+	if (do_lseek(handle, handle->options_start, SEEK_SET) == (off64_t)-1)
+		return -1;
+	offset = convert_endian_8(handle, offset);
+	if (do_write_check(handle, &offset, 8))
+		return -1;
+	return 0;
+}
+
+/**
+ * tracecmd_pepare_options - perpare a previous options for the next
+ * @handle: The handle to update the options for.
+ * @offset: The offset to set the previous options to.
+ * @whence: Where in the file to offset from.
+ *
+ * In a case of cached writes for network access, the options offset
+ * cannot be written once it goes over the network. This is used
+ * to update the next options to a known location.
+ *
+ * tracecmd_write_options() must be called when the offset is at the next
+ * location, otherwise the data file will end up corrupted.
+ *
+ * Returns zero on success and -1 on error.
+ */
+int tracecmd_prepare_options(struct tracecmd_output *handle, off64_t offset, int whence)
+{
+	tsize_t curr;
+	int ret;
+
+	/* No options to start with? */
+	if (!handle->options_start)
+		return 0;
+
+	curr = do_lseek(handle, 0, SEEK_CUR);
+
+	switch (whence) {
+	case SEEK_SET:
+		/* just use offset */
+		break;
+	case SEEK_CUR:
+		offset += curr;
+		break;
+	case SEEK_END:
+		offset = do_lseek(handle, offset, SEEK_END);
+		if (offset == (off64_t)-1)
+			return -1;
+		break;
+	}
+	ret = update_options_start(handle, offset);
+	if (ret < 0)
+		return -1;
+
+	handle->options_next = offset;
+
+	curr = do_lseek(handle, curr, SEEK_SET);
+
+	return curr == -1 ? -1 : 0;
+}
+
+static tsize_t write_options_start(struct tracecmd_output *handle)
+{
+	tsize_t offset;
+	int ret;
+
+	offset = do_lseek(handle, 0, SEEK_CUR);
+
+	if (handle->options_next) {
+		/* options_start was already updated */
+		if (handle->options_next != offset) {
+			tracecmd_warning("Options offset (%lld) does not match expected (%lld)",
+					 offset, handle->options_next);
+			return -1;
+		}
+		handle->options_next = 0;
+		/* Will be updated at the end */
+		handle->options_start = 0;
+	}
+
+	/* Append to the previous options section, if any */
+	if (handle->options_start) {
+		ret = update_options_start(handle, offset);
+		if (ret < 0)
+			return -1;
+		offset = do_lseek(handle, offset, SEEK_SET);
+		if (offset == (off_t)-1)
+			return -1;
+	}
+
+	return out_write_section_header(handle, TRACECMD_OPTION_DONE, "options", 0, false);
+}
+
+static tsize_t write_options_end(struct tracecmd_output *handle, tsize_t offset)
+{
+	unsigned long long endian8;
+	unsigned short endian2;
+	unsigned int endian4;
+
+	endian2 = convert_endian_2(handle, TRACECMD_OPTION_DONE);
+	if (do_write_check(handle, &endian2, 2))
+		return -1;
+	endian4 = convert_endian_4(handle, 8);
+	if (do_write_check(handle, &endian4, 4))
+		return -1;
+	endian8 = 0;
+	handle->options_start = do_lseek(handle, 0, SEEK_CUR);
+	if (do_write_check(handle, &endian8, 8))
+		return -1;
+	if (out_update_section_header(handle, offset))
+		return -1;
+
+	return 0;
+}
+
 static int write_options(struct tracecmd_output *handle)
 {
 	struct tracecmd_option *options;
-	unsigned long long endian8;
 	unsigned short endian2;
 	unsigned int endian4;
 	bool new = false;
@@ -1857,22 +1971,15 @@ static int write_options(struct tracecmd_output *handle)
 			break;
 		}
 	}
-	if (!new)
+	/*
+	 * Even if there are no new options, if options_next is set, it requires
+	 * adding a new empty options section as the previous one already
+	 * points to it.
+	 */
+	if (!new && !handle->options_next)
 		return 0;
-	offset = do_lseek(handle, 0, SEEK_CUR);
 
-	/* Append to the previous options section, if any */
-	if (handle->options_start) {
-		if (do_lseek(handle, handle->options_start, SEEK_SET) == (off64_t)-1)
-			return -1;
-		endian8 = convert_endian_8(handle, offset);
-		if (do_write_check(handle, &endian8, 8))
-			return -1;
-		if (do_lseek(handle, offset, SEEK_SET) == (off_t)-1)
-			return -1;
-	}
-
-	offset = out_write_section_header(handle, TRACECMD_OPTION_DONE, "options", 0, false);
+	offset = write_options_start(handle);
 	if (offset == (off_t)-1)
 		return -1;
 
@@ -1892,20 +1999,104 @@ static int write_options(struct tracecmd_output *handle)
 			return -1;
 	}
 
-	endian2 = convert_endian_2(handle, TRACECMD_OPTION_DONE);
-	if (do_write_check(handle, &endian2, 2))
-		return -1;
-	endian4 = convert_endian_4(handle, 8);
-	if (do_write_check(handle, &endian4, 4))
-		return -1;
-	endian8 = 0;
-	handle->options_start = do_lseek(handle, 0, SEEK_CUR);
-	if (do_write_check(handle, &endian8, 8))
-		return -1;
-	if (out_update_section_header(handle, offset))
+	return write_options_end(handle, offset);
+}
+
+/**
+ * trace_get_options - Get the current options from the output file handle
+ * @handle: The output file descriptor that has options.
+ * @len: Returns the length of the buffer allocated and returned.
+ *
+ * Reads the options that have not been written to the file yet,
+ * puts them into an allocated buffer and sets @len to the size
+ * added. Used by trace-msg.c to send options over the network.
+ *
+ * Note, the options cannot be referenced again once this is called.
+ *  New options can be added and referenced.
+ *
+ * Returns an allocated buffer (must be freed with free()) that contains
+ *   the options to send, with @len set to the size of the content.
+ *   NULL on error (and @len is undefined).
+ */
+__hidden void *trace_get_options(struct tracecmd_output *handle, size_t *len)
+{
+	struct tracecmd_msg_handle msg_handle;
+	struct tracecmd_output out_handle;
+	struct tracecmd_option *options;
+	unsigned short endian2;
+	unsigned int endian4;
+	tsize_t offset;
+	void *buf = NULL;
+
+	/* Use the msg_cache as our output */
+	memset(&msg_handle, 0, sizeof(msg_handle));
+	msg_handle.cfd = -1;
+	if (tracecmd_msg_handle_cache(&msg_handle) < 0)
+		return NULL;
+
+	out_handle = *handle;
+	out_handle.fd = msg_handle.cfd;
+	out_handle.msg_handle = &msg_handle;
+
+	list_for_each_entry(options, &handle->options, list) {
+		/* Option is already saved, skip it */
+		if (options->offset)
+			continue;
+		endian2 = convert_endian_2(handle, options->id);
+		if (do_write_check(&out_handle, &endian2, 2))
+			goto out;
+		endian4 = convert_endian_4(handle, options->size);
+		if (do_write_check(&out_handle, &endian4, 4))
+			goto out;
+		/* The option can not be referenced again */
+		options->offset = -1;
+		if (do_write_check(&out_handle, options->data, options->size))
+			goto out;
+	}
+
+	offset = do_lseek(&out_handle, 0, SEEK_CUR);
+	buf = malloc(offset);
+	if (!buf)
+		goto out;
+
+	if (do_lseek(&out_handle, 0, SEEK_SET) == (off64_t)-1)
+		goto out;
+	*len = read(msg_handle.cfd, buf, offset);
+	if (*len != offset) {
+		free(buf);
+		buf = NULL;
+	}
+
+ out:
+	close(msg_handle.cfd);
+	return buf;
+}
+
+/**
+ * trace_append_options - Append options to the file
+ * @handle: The output file descriptor that has options.
+ * @buf: The options to append.
+ * @len: The length of @buf.
+ *
+ * Will add an options section header for the content of @buf to
+ * be written as options into the @handle.
+ * Used by trace-msg.c to retrieve options over the network.
+ *
+ * Returns 0 on success and -1 on error.
+ */
+__hidden int trace_append_options(struct tracecmd_output *handle, void *buf,
+				  size_t len)
+{
+	tsize_t offset;
+
+	offset = write_options_start(handle);
+	if (offset == (off_t)-1)
 		return -1;
 
-	return 0;
+	if (do_write_check(handle, buf, len))
+		return -1;
+
+	return write_options_end(handle, offset);
 }
 
 int tracecmd_write_meta_strings(struct tracecmd_output *handle)
@@ -2139,6 +2330,10 @@ out_add_buffer_option(struct tracecmd_output *handle, const char *name,
 		return NULL;
 
 	clock = get_clock(handle);
+	if (!clock) {
+		tracecmd_warning("Could not find clock, set to 'local'");
+		clock = "local";
+	}
 
 	/*
 	 * Buffer flyrecord option:
@@ -2521,6 +2716,9 @@ __hidden int out_write_cpu_data(struct tracecmd_output *handle,
 		goto out_free;
 
 	handle->file_state = TRACECMD_FILE_CPU_FLYRECORD;
+
+	if (HAS_SECTIONS(handle))
+		tracecmd_write_options(handle);
 
 	return 0;
 

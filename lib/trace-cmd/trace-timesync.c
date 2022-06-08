@@ -8,9 +8,6 @@
 #include <stdlib.h>
 #include <unistd.h>
 #include <arpa/inet.h>
-#ifdef VSOCK
-#include <linux/vm_sockets.h>
-#endif
 #include <linux/limits.h>
 #include <sys/types.h>
 #include <sys/stat.h>
@@ -65,10 +62,8 @@ static struct tsync_proto *tsync_proto_find(const char *proto_name)
  */
 void tracecmd_tsync_init(void)
 {
-#ifdef VSOCK
 	ptp_clock_sync_register();
 	kvm_clock_sync_register();
-#endif
 }
 
 int tracecmd_tsync_proto_register(const char *proto_name, int accuracy, int roles,
@@ -245,6 +240,22 @@ tsync_proto_select(const struct tracecmd_tsync_protos *protos,
 }
 
 /**
+ * tracecmd_tsync_get_proto - return the appropriate synchronization protocol
+ * @protos: The list of synchronization protocols to choose from
+ * @clock: The clock that is being used (or NULL for unknown).
+ *
+ * Retuns pointer to a protocol name, that can be used with the peer, or NULL
+ *	  in case there is no match with supported protocols.
+ *	  The returned string MUST NOT be freed by the caller
+ */
+__hidden const char *
+tracecmd_tsync_get_proto(const struct tracecmd_tsync_protos *protos,
+			 const char *clock, enum tracecmd_time_sync_role role)
+{
+	return tsync_proto_select(protos, clock, role);
+}
+
+/**
  * tracecmd_tsync_proto_getall - Returns list of all supported
  *				 time sync protocols
  * @protos: return, allocated list of time sync protocol names,
@@ -344,118 +355,6 @@ error:
 	return -1;
 }
 
-#ifdef VSOCK
-static int vsock_open(unsigned int cid, unsigned int port)
-{
-	struct sockaddr_vm addr = {
-		.svm_family = AF_VSOCK,
-		.svm_cid = cid,
-		.svm_port = port,
-	};
-	int sd;
-
-	sd = socket(AF_VSOCK, SOCK_STREAM, 0);
-	if (sd < 0)
-		return -errno;
-
-	if (connect(sd, (struct sockaddr *)&addr, sizeof(addr)))
-		return -errno;
-
-	return sd;
-}
-
-static int vsock_make(void)
-{
-	struct sockaddr_vm addr = {
-		.svm_family = AF_VSOCK,
-		.svm_cid = VMADDR_CID_ANY,
-		.svm_port = VMADDR_PORT_ANY,
-	};
-	int sd;
-
-	sd = socket(AF_VSOCK, SOCK_STREAM, 0);
-	if (sd < 0)
-		return -errno;
-
-	setsockopt(sd, SOL_SOCKET, SO_REUSEADDR, &(int){1}, sizeof(int));
-
-	if (bind(sd, (struct sockaddr *)&addr, sizeof(addr)))
-		return -errno;
-
-	if (listen(sd, SOMAXCONN))
-		return -errno;
-
-	return sd;
-}
-
-int __hidden vsock_get_port(int sd, unsigned int *port)
-{
-	struct sockaddr_vm addr;
-	socklen_t addr_len = sizeof(addr);
-
-	if (getsockname(sd, (struct sockaddr *)&addr, &addr_len))
-		return -errno;
-
-	if (addr.svm_family != AF_VSOCK)
-		return -EINVAL;
-
-	if (port)
-		*port = addr.svm_port;
-
-	return 0;
-}
-
-static int get_vsocket_params(int fd, unsigned int *lcid, unsigned int *lport,
-			      unsigned int *rcid, unsigned int *rport)
-{
-	struct sockaddr_vm addr;
-	socklen_t addr_len = sizeof(addr);
-
-	memset(&addr, 0, sizeof(addr));
-	if (getsockname(fd, (struct sockaddr *)&addr, &addr_len))
-		return -1;
-	if (addr.svm_family != AF_VSOCK)
-		return -1;
-	*lport = addr.svm_port;
-	*lcid = addr.svm_cid;
-
-	memset(&addr, 0, sizeof(addr));
-	addr_len = sizeof(addr);
-	if (getpeername(fd, (struct sockaddr *)&addr, &addr_len))
-		return -1;
-	if (addr.svm_family != AF_VSOCK)
-		return -1;
-	*rport = addr.svm_port;
-	*rcid = addr.svm_cid;
-
-	return 0;
-}
-
-#else
-static int vsock_open(unsigned int cid, unsigned int port)
-{
-	return -ENOTSUP;
-}
-
-static int vsock_make(void)
-{
-	return -ENOTSUP;
-
-}
-
-static int vsock_get_port(int sd, unsigned int *port)
-{
-	return -ENOTSUP;
-}
-
-static int get_vsocket_params(int fd, unsigned int *lcid, unsigned int *lport,
-			      unsigned int *rcid, unsigned int *rport)
-{
-	return -ENOTSUP;
-}
-
-#endif /* VSOCK */
-
 static struct tracefs_instance *
 clock_synch_create_instance(const char *clock, unsigned int cid)
 {
@@ -502,13 +401,8 @@ static int clock_context_init(struct tracecmd_time_sync *tsync,
 	clock->is_guest = guest;
 	clock->is_server = clock->is_guest;
 
-	if (get_vsocket_params(tsync->msg_handle->fd, &clock->local_cid,
-			       &clock->local_port, &clock->remote_cid,
-			       &clock->remote_port))
-		goto error;
-
 	clock->instance = clock_synch_create_instance(tsync->clock_str,
-						      clock->remote_cid);
+						      tsync->remote_id);
 	if (!clock->instance)
 		goto error;
 
@@ -583,9 +477,13 @@ void tracecmd_tsync_free(struct tracecmd_time_sync *tsync)
 	if (tsync->msg_handle)
 		tracecmd_msg_handle_close(tsync->msg_handle);
 
-	pthread_mutex_destroy(&tsync->lock);
-	pthread_cond_destroy(&tsync->cond);
-	pthread_barrier_destroy(&tsync->first_sync);
+	/* These are only created from the host */
+	if (tsync->guest_pid) {
+		pthread_mutex_destroy(&tsync->lock);
+		pthread_cond_destroy(&tsync->cond);
+		pthread_barrier_destroy(&tsync->first_sync);
+	}
+
 	free(tsync->clock_str);
 	free(tsync->proto_name);
 	free(tsync);
@@ -807,8 +705,10 @@ static int tsync_with_guest(struct tracecmd_time_sync *tsync)
 			first = false;
 			pthread_barrier_wait(&tsync->first_sync);
 		}
-		if (end || i < tsync->vcpu_count)
+		if (end || i < tsync->vcpu_count) {
+			pthread_mutex_unlock(&tsync->lock);
 			break;
+		}
 		if (tsync->loop_interval > 0) {
 			get_ts_loop_delay(&timeout, tsync->loop_interval);
 			ret = pthread_cond_timedwait(&tsync->cond, &tsync->lock, &timeout);
@@ -843,8 +743,7 @@ static void *tsync_host_thread(void *data)
  * tracecmd_tsync_with_guest - Synchronize timestamps with guest
  *
  * @trace_id: Local ID for the current trace session
- * @cid: CID of the guest
- * @port: VSOCKET port, on which the guest listens for tsync requests
+ * @fd: file descriptor of guest
  * @guest_pid: PID of the host OS process, running the guest
  * @guest_cpus: Number of the guest VCPUs
  * @proto_name: Name of the negotiated time synchronization protocol
@@ -858,14 +757,13 @@ static void *tsync_host_thread(void *data)
  */
 struct tracecmd_time_sync *
 tracecmd_tsync_with_guest(unsigned long long trace_id, int loop_interval,
-			  unsigned int cid, unsigned int port, int guest_pid,
+			  unsigned int fd, int guest_pid,
 			  int guest_cpus, const char *proto_name, const char *clock)
 {
 	struct tracecmd_time_sync *tsync;
 	cpu_set_t *pin_mask = NULL;
 	pthread_attr_t attrib;
 	size_t mask_size = 0;
-	int fd = -1;
 	int ret;
 
 	if (!proto_name)
@@ -878,9 +776,6 @@ tracecmd_tsync_with_guest(unsigned long long trace_id, int loop_interval,
 	tsync->trace_id = trace_id;
 	tsync->loop_interval = loop_interval;
 	tsync->proto_name = strdup(proto_name);
-	fd = vsock_open(cid, port);
-	if (fd < 0)
-		goto error;
 
 	tsync->msg_handle = tracecmd_msg_handle_alloc(fd, 0);
 	if (!tsync->msg_handle) {
@@ -1042,34 +937,19 @@ int tracecmd_tsync_with_guest_stop(struct tracecmd_time_sync *tsync)
 static void *tsync_agent_thread(void *data)
 {
 	struct tracecmd_time_sync *tsync = data;
-	long ret = 0;
-	int sd;
-
-	while (true) {
-		sd = accept(tsync->msg_handle->fd, NULL, NULL);
-		if (sd < 0) {
-			if (errno == EINTR)
-				continue;
-			ret = -1;
-			goto out;
-		}
-		break;
-	}
-	close(tsync->msg_handle->fd);
-	tsync->msg_handle->fd = sd;
 
 	tsync_with_host(tsync);
-
-out:
-	pthread_exit((void *)ret);
+	pthread_exit(NULL);
 }
 
 /**
  * tracecmd_tsync_with_host - Synchronize timestamps with host
- *
- * @tsync_protos: List of tsync protocols, supported by the host
+ * @fd: File descriptor connecting with the host
+ * @proto: The selected protocol
  * @clock: Trace clock, used for that session
  * @port: returned, VSOCKET port, on which the guest listens for tsync requests
+ * @remote_id: Identifier to uniquely identify the remote host
+ * @local_id: Identifier to uniquely identify the local machine
  *
  * On success, a pointer to time sync context is returned, or NULL in
  * case of an error. The context must be freed with tracecmd_tsync_free()
@@ -1078,36 +958,26 @@ out:
  * until tracecmd_tsync_with_host_stop() is called.
  */
 struct tracecmd_time_sync *
-tracecmd_tsync_with_host(const struct tracecmd_tsync_protos *tsync_protos,
-			 const char *clock)
+tracecmd_tsync_with_host(int fd, const char *proto, const char *clock,
+			 int remote_id, int local_id)
 {
 	struct tracecmd_time_sync *tsync;
 	cpu_set_t *pin_mask = NULL;
 	pthread_attr_t attrib;
 	size_t mask_size = 0;
-	unsigned int port;
-	const char *proto;
 	int ret;
-	int fd;
 
 	tsync = calloc(1, sizeof(struct tracecmd_time_sync));
 	if (!tsync)
 		return NULL;
 
-	proto = tsync_proto_select(tsync_protos, clock,
-				   TRACECMD_TIME_SYNC_ROLE_GUEST);
-	if (!proto)
-		goto error;
 	tsync->proto_name = strdup(proto);
-	fd = vsock_make();
-	if (fd < 0)
-		goto error;
-
-	if (vsock_get_port(fd, &port) < 0)
-		goto error;
 	tsync->msg_handle = tracecmd_msg_handle_alloc(fd, 0);
 	if (clock)
 		tsync->clock_str = strdup(clock);
+
+	tsync->remote_id = remote_id;
+	tsync->local_id = local_id;
 
 	pthread_attr_init(&attrib);
 	tsync->vcpu_count = tracecmd_count_cpus();
@@ -1129,10 +999,11 @@ tracecmd_tsync_with_host(const struct tracecmd_tsync_protos *tsync_protos,
 
 error:
 	if (tsync) {
-		if (tsync->msg_handle)
+		if (tsync->msg_handle) {
+			/* Do not close the fd that was passed it */
+			tsync->msg_handle->fd = -1;
 			tracecmd_msg_handle_close(tsync->msg_handle);
-		else if (fd >= 0)
-			close(fd);
+		}
 		free(tsync->clock_str);
 		free(tsync);
 	}
@@ -1152,40 +1023,4 @@ error:
 int tracecmd_tsync_with_host_stop(struct tracecmd_time_sync *tsync)
 {
 	return pthread_join(tsync->thread, NULL);
-}
-
-/**
- * tracecmd_tsync_get_session_params - Get parameters of established time sync session
- *
- * @tsync: Time sync context, representing a running time sync session
- * @selected_proto: return, name of the selected time sync protocol for this session
- * @tsync_port: return, a VSOCK port on which new time sync requests are accepted.
- *
- * Returns 0 on success, or -1 in case of an error.
- *
- */
-int tracecmd_tsync_get_session_params(struct tracecmd_time_sync *tsync,
-				      char **selected_proto,
-				      unsigned int *tsync_port)
-{
-	int ret;
-
-	if (!tsync)
-		return -1;
-
-	if (tsync_port) {
-		if (!tsync->msg_handle)
-			return -1;
-		ret = vsock_get_port(tsync->msg_handle->fd, tsync_port);
-		if (ret < 0)
-			return ret;
-	}
-	if (selected_proto) {
-		if (!tsync->proto_name)
-			return -1;
-		(*selected_proto) = strdup(tsync->proto_name);
-
-	}
-
-	return 0;
 }

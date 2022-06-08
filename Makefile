@@ -1,8 +1,8 @@
 # SPDX-License-Identifier: GPL-2.0
 # trace-cmd version
 TC_VERSION = 3
-TC_PATCHLEVEL = 0
-TC_EXTRAVERSION = 3
+TC_PATCHLEVEL = 1
+TC_EXTRAVERSION = 0
 TRACECMD_VERSION = $(TC_VERSION).$(TC_PATCHLEVEL).$(TC_EXTRAVERSION)
 
 export TC_VERSION
@@ -23,7 +23,7 @@ export LIBTRACECMD_VERSION
 VERSION_FILE = ltc_version.h
 
 LIBTRACEEVENT_MIN_VERSION = 1.5
-LIBTRACEFS_MIN_VERSION = 1.3
+LIBTRACEFS_MIN_VERSION = 1.4
 
 MAKEFLAGS += --no-print-directory
 
@@ -163,7 +163,7 @@ export NO_PYTHON
 # $(call test-build, snippet, ret) -> ret if snippet compiles
 #                                  -> empty otherwise
 test-build = $(if $(shell sh -c 'echo "$(1)" | \
-	$(CC) -o /dev/null -c -x c - > /dev/null 2>&1 && echo y'), $2)
+	$(CC) -o /dev/null -x c - > /dev/null 2>&1 && echo y'), $2)
 
 UDIS86_AVAILABLE := $(call test-build,\#include <udis86.h>, y)
 ifneq ($(strip $(UDIS86_AVAILABLE)), y)
@@ -183,6 +183,15 @@ endef
 
 # have flush/fua block layer instead of barriers?
 blk-flags := $(call test-build,$(BLK_TC_FLUSH_SOURCE),-DHAVE_BLK_TC_FLUSH)
+
+define MEMFD_CREATE_SOURCE
+#define _GNU_SOURCE
+#include <sys/mman.h>
+int main(void) { return memfd_create(\"test\", 0); }
+endef
+
+# have memfd_create available
+memfd-flags := $(call test-build,$(MEMFD_CREATE_SOURCE),-DHAVE_MEMFD_CREATE)
 
 ifeq ("$(origin O)", "command line")
 
@@ -287,7 +296,11 @@ CFLAGS ?= -g -Wall
 CPPFLAGS ?=
 LDFLAGS ?=
 
+ifndef NO_VSOCK
 VSOCK_DEFINED := $(shell if (echo "$(pound)include <linux/vm_sockets.h>" | $(CC) -E - >/dev/null 2>&1) ; then echo 1; else echo 0 ; fi)
+else
+VSOCK_DEFINED := 0
+endif
 
 export VSOCK_DEFINED
 ifeq ($(VSOCK_DEFINED), 1)
@@ -359,7 +372,7 @@ endif
 # Append required CFLAGS
 override CFLAGS += $(INCLUDES) $(VAR_DIR)
 override CFLAGS += $(PLUGIN_DIR_TRACECMD_SQ)
-override CFLAGS += $(udis86-flags) $(blk-flags)
+override CFLAGS += $(udis86-flags) $(blk-flags) $(memfd-flags)
 override LDFLAGS += $(udis86-ldflags)
 
 CMD_TARGETS = trace-cmd $(BUILD_PYTHON)

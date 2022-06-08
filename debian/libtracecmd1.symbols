@@ -57,6 +57,7 @@ libtracecmd.so.1 libtracecmd1 #MINVER#
  tracecmd_create_recorder_virt@Base 3.0.3
  tracecmd_critical@Base 3.0.3
  tracecmd_curr_thread_handle@Base 3.0.3
+ tracecmd_debug@Base 3.1
  tracecmd_default_file_version@Base 3.0.3
  tracecmd_enable_tsync@Base 3.0.3
  tracecmd_filter_id_add@Base 3.0.3
@@ -110,25 +111,32 @@ libtracecmd.so.1 libtracecmd1 #MINVER#
  tracecmd_long_size@Base 3.0.3
  tracecmd_make_pipe@Base 3.0.3
  tracecmd_msg_collect_data@Base 3.0.3
+ tracecmd_msg_cont@Base 3.1
  tracecmd_msg_data_send@Base 3.0.3
  tracecmd_msg_done@Base 3.0.3
  tracecmd_msg_finish_sending_data@Base 3.0.3
+ tracecmd_msg_flush_data@Base 3.1
  tracecmd_msg_handle_alloc@Base 3.0.3
  tracecmd_msg_handle_cache@Base 3.0.3
  tracecmd_msg_handle_close@Base 3.0.3
  tracecmd_msg_initial_setting@Base 3.0.3
  tracecmd_msg_read_data@Base 3.0.3
+ tracecmd_msg_read_options@Base 3.1
  tracecmd_msg_recv_time_sync@Base 3.0.3
+ tracecmd_msg_recv_trace_proxy@Base 3.1
  tracecmd_msg_recv_trace_req@Base 3.0.3
  tracecmd_msg_recv_trace_resp@Base 3.0.3
  tracecmd_msg_send_close_msg@Base 3.0.3
  tracecmd_msg_send_close_resp_msg@Base 3.0.3
  tracecmd_msg_send_init_data@Base 3.0.3
+ tracecmd_msg_send_options@Base 3.1
  tracecmd_msg_send_port_array@Base 3.0.3
  tracecmd_msg_send_time_sync@Base 3.0.3
+ tracecmd_msg_send_trace_proxy@Base 3.1
  tracecmd_msg_send_trace_req@Base 3.0.3
  tracecmd_msg_send_trace_resp@Base 3.0.3
  tracecmd_msg_set_done@Base 3.0.3
+ tracecmd_msg_wait@Base 3.1
  tracecmd_msg_wait_close@Base 3.0.3
  tracecmd_msg_wait_close_resp@Base 3.0.3
  tracecmd_open@Base 3.0.3
@@ -159,6 +167,7 @@ libtracecmd.so.1 libtracecmd1 #MINVER#
  tracecmd_plugin_context_input@Base 3.0.3
  tracecmd_plugin_context_output@Base 3.0.3
  tracecmd_plugin_set_flag@Base 3.0.3
+ tracecmd_prepare_options@Base 3.1
  tracecmd_print_events@Base 3.0.3
  tracecmd_print_stats@Base 3.0.3
  tracecmd_print_uname@Base 3.0.3
@@ -197,7 +206,7 @@ libtracecmd.so.1 libtracecmd1 #MINVER#
  tracecmd_translate_data@Base 3.0.3
  tracecmd_tsync_free@Base 3.0.3
  tracecmd_tsync_get_offsets@Base 3.0.3
- tracecmd_tsync_get_session_params@Base 3.0.3
+#MISSING: 3.1-1# tracecmd_tsync_get_session_params@Base 3.0.3
  tracecmd_tsync_init@Base 3.0.3
  tracecmd_tsync_proto_getall@Base 3.0.3
  tracecmd_tsync_proto_register@Base 3.0.3

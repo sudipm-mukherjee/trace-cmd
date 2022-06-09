@@ -10,6 +10,7 @@ Copyright: 2008-2010, 2013-2014, Red Hat Inc, Steven Rostedt <srostedt@redhat.co
            2019, VMware Inc, Yordan Karadzhov <ykaradzhov@vmware.com>
            2018,2019, VMware Inc, Slavomir Kaslev <kaslevs@vmware.com>
            2013 Hitachi, Ltd.,Yoshihiro YUNOMAE <yoshihiro.yunomae.ez@hitachi.com>
+           2021, Google Inc, Steven Rostedt <rostedt@goodmis.org>
 License:   GPL-2
 
 Files:     include/trace-cmd/trace-cmd.h

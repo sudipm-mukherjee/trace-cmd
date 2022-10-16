@@ -34,7 +34,6 @@ Files:     include/trace-cmd/trace-cmd.h
            lib/trace-cmd/trace-plugin.c
            lib/trace-cmd/trace-recorder.c
            lib/trace-cmd/trace-timesync-kvm.c
-           utest/tracefs-utest.c
            utest/trace-utest.h
            utest/trace-utest.c
            tracecmd/trace-clear.c
@@ -43,12 +42,16 @@ Files:     include/trace-cmd/trace-cmd.h
            lib/trace-cmd/trace-util.c
            lib/trace-cmd/trace-timesync.c
            lib/trace-cmd/trace-timesync-ptp.c
+           check-manpages.sh
+           lib/trace-cmd/trace-filter.c
+           utest/tracecmd-utest.c
 Copyright: 2009, Steven Rostedt <srostedt@redhat.com>
            2008-2010, 2015, Red Hat Inc, Steven Rostedt <srostedt@redhat.com>
            2018, VMware Inc, Steven Rostedt <rostedt@goodmis.org>
-           2019-2021, VMware, Tzvetomir Stoyanov <tz.stoyanov@gmail.com>
+           2019-2022, VMware, Tzvetomir Stoyanov <tz.stoyanov@gmail.com>
            2022, Sebastian Andrzej Siewior <sebastian@breakpoint.cc>
            2013, Hitachi, Ltd.
+           2022, Google Inc, Steven Rostedt <rostedt@goodmis.org>
 License:   LGPL-2.1
 
 Files:     debian/*

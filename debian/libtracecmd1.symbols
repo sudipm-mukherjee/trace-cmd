@@ -60,6 +60,7 @@ libtracecmd.so.1 libtracecmd1 #MINVER#
  tracecmd_debug@Base 3.1
  tracecmd_default_file_version@Base 3.0.3
  tracecmd_enable_tsync@Base 3.0.3
+ tracecmd_filter_add@Base 3.1.4
  tracecmd_filter_id_add@Base 3.0.3
  tracecmd_filter_id_clear@Base 3.0.3
  tracecmd_filter_id_compare@Base 3.0.3
@@ -70,6 +71,7 @@ libtracecmd.so.1 libtracecmd1 #MINVER#
  tracecmd_filter_id_remove@Base 3.0.3
  tracecmd_filter_ids@Base 3.0.3
  tracecmd_flush_recording@Base 3.0.3
+ tracecmd_follow_event@Base 3.1.4
  tracecmd_free_hooks@Base 3.0.3
  tracecmd_free_record@Base 3.0.3
  tracecmd_free_recorder@Base 3.0.3
@@ -78,6 +80,7 @@ libtracecmd.so.1 libtracecmd1 #MINVER#
  tracecmd_ftrace_overrides@Base 3.0.3
  tracecmd_generate_traceid@Base 3.0.3
  tracecmd_get_cpu_file_size@Base 3.0.3
+ tracecmd_get_cpu_map@Base 3.1.4
  tracecmd_get_cpustats@Base 3.0.3
  tracecmd_get_cursor@Base 3.0.3
  tracecmd_get_debug@Base 3.0.3
@@ -87,11 +90,13 @@ libtracecmd.so.1 libtracecmd1 #MINVER#
  tracecmd_get_flags@Base 3.0.3
  tracecmd_get_guest_cpumap@Base 3.0.3
  tracecmd_get_in_file_version@Base 3.0.3
+ tracecmd_get_notimeout@Base 3.1.4
  tracecmd_get_options_offset@Base 3.0.3
  tracecmd_get_out_file_offset@Base 3.0.3
  tracecmd_get_out_file_version@Base 3.0.3
  tracecmd_get_output_handle_fd@Base 3.0.3
  tracecmd_get_parsing_failures@Base 3.0.3
+ tracecmd_get_private@Base 3.1.4
  tracecmd_get_quiet@Base 3.0.3
  tracecmd_get_show_data_func@Base 3.0.3
  tracecmd_get_tep@Base 3.0.3
@@ -105,11 +110,19 @@ libtracecmd.so.1 libtracecmd1 #MINVER#
  tracecmd_init_data@Base 3.0.3
  tracecmd_is_buffer_instance@Base 3.0.3
  tracecmd_is_version_supported@Base 3.0.3
+ tracecmd_iterate_events@Base 3.1.4
+ tracecmd_iterate_events_multi@Base 3.1.4
  tracecmd_latency_data_read@Base 3.0.3
  tracecmd_load_chunks_info@Base 3.0.3
  tracecmd_load_plugins@Base 3.0.3
  tracecmd_long_size@Base 3.0.3
  tracecmd_make_pipe@Base 3.0.3
+ tracecmd_map_find_by_host_pid@Base 3.1.4
+ tracecmd_map_get_guest@Base 3.1.4
+ tracecmd_map_get_host_pid@Base 3.1.4
+ tracecmd_map_get_private@Base 3.1.4
+ tracecmd_map_set_private@Base 3.1.4
+ tracecmd_map_vcpus@Base 3.1.4
  tracecmd_msg_collect_data@Base 3.0.3
  tracecmd_msg_cont@Base 3.1
  tracecmd_msg_data_send@Base 3.0.3
@@ -195,7 +208,9 @@ libtracecmd.so.1 libtracecmd1 #MINVER#
  tracecmd_set_flag@Base 3.0.3
  tracecmd_set_logfile@Base 3.0.3
  tracecmd_set_loglevel@Base 3.0.3
+ tracecmd_set_notimeout@Base 3.1.4
  tracecmd_set_out_clock@Base 3.0.3
+ tracecmd_set_private@Base 3.1.4
  tracecmd_set_quiet@Base 3.0.3
  tracecmd_set_show_data_func@Base 3.0.3
  tracecmd_set_ts2secs@Base 3.0.3

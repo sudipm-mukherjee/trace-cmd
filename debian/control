@@ -5,7 +5,7 @@ Maintainer: Sudip Mukherjee <sudipm.mukherjee@gmail.com>
 Build-Depends:
  debhelper-compat (= 13), asciidoc, docbook-xsl, xsltproc, libcunit1-dev,
  xmlto, pkg-config, libtraceevent-dev, libtracefs-dev, libzstd-dev, source-highlight
-Standards-Version: 4.6.0.1
+Standards-Version: 4.6.1.0
 Rules-Requires-Root: no
 Vcs-Browser: https://github.com/sudipm-mukherjee/trace-cmd.git
 Vcs-Git: https://github.com/sudipm-mukherjee/trace-cmd.git

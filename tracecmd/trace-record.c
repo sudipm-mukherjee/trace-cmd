@@ -195,6 +195,7 @@ struct common_record_context {
 	enum trace_cmd curr_cmd;
 	struct buffer_instance *instance;
 	const char *output;
+	const char *temp;
 	char *date2ts;
 	char *user;
 	const char *clock;
@@ -526,6 +527,23 @@ static char *get_temp_file(struct buffer_instance *instance, int cpu)
 	char *file = NULL;
 	int size;
 
+	if (instance->temp_dir) {
+		if (!instance->temp_file) {
+			const char *f = output_file + strlen(output_file) - 1;;
+			int ret;
+
+			for (; f > output_file && *f != '/'; f--)
+				;
+			if (*f == '/')
+				f++;
+			ret = asprintf(&instance->temp_file, "%s/%s",
+				       instance->temp_dir, f);
+			if (ret < 0)
+				die("Failed to create temp file");
+		}
+		output_file = instance->temp_file;
+	}
+
 	name = tracefs_instance_get_name(instance->tracefs);
 	if (name) {
 		size = snprintf(file, 0, "%s.%s.cpu%d", output_file, name, cpu);
@@ -570,9 +588,14 @@ static void put_temp_file(char *file)
 
 static void delete_temp_file(struct buffer_instance *instance, int cpu)
 {
-	const char *output_file = instance->output_file;
+	const char *output_file;
 	const char *name;
 	char file[PATH_MAX];
+
+	if (instance->temp_file)
+		output_file = instance->temp_file;
+	else
+		output_file = instance->output_file;
 
 	name = tracefs_instance_get_name(instance->tracefs);
 	if (name)
@@ -3849,15 +3872,28 @@ static int open_guest_fifos(const char *guest, int **fds)
 	return i;
 }
 
+static bool clock_is_supported(struct tracefs_instance *instance, const char *clock);
+
 static int host_tsync(struct common_record_context *ctx,
 		      struct buffer_instance *instance,
 		      unsigned int tsync_port, char *proto)
 {
+	struct buffer_instance *iter_instance;
 	int guest_id = -1;
 	int fd;
 
 	if (!proto)
 		return -1;
+
+	/* If connecting to a proxy, the clock may still need to be set */
+	if (strcmp(proto, "kvm") == 0 &&
+	    clock_is_supported(NULL, TSC_CLOCK)) {
+		ctx->clock = TSC_CLOCK;
+		for_all_instances(iter_instance) {
+			iter_instance->clock = TSC_CLOCK;
+			set_clock(ctx, iter_instance);
+		}
+	}
 
 	if (is_network(instance)) {
 		fd = connect_port(instance->name, tsync_port,
@@ -3898,15 +3934,15 @@ static void connect_to_agent(struct common_record_context *ctx,
 		use_fifos = nr_fifos > 0;
 	}
 
-	if (ctx->instance->result) {
+	if (instance->result) {
 		role = TRACECMD_TIME_SYNC_ROLE_CLIENT;
-		sd = connect_addr(ctx->instance->result);
+		sd = connect_addr(instance->result);
 		if (sd < 0)
 			die("Failed to connect to host %s:%u",
 			    instance->name, instance->port);
 	} else {
 		/* If connecting to a proxy, then this is the guest */
-		if (is_proxy(ctx->instance))
+		if (is_proxy(instance))
 			role = TRACECMD_TIME_SYNC_ROLE_GUEST;
 		else
 			role = TRACECMD_TIME_SYNC_ROLE_HOST;
@@ -5701,7 +5737,9 @@ enum {
 	OPT_cmdlines_size	= 258,
 	OPT_poll		= 259,
 	OPT_name		= 260,
-	OPT_proxy		= 261
+	OPT_proxy		= 261,
+	OPT_temp		= 262,
+	OPT_notimeout		= 264,
 };
 
 void trace_stop(int argc, char **argv)
@@ -6112,6 +6150,7 @@ static void parse_record_options(int argc,
 			{"cmdlines-size", required_argument, NULL, OPT_cmdlines_size},
 			{"no-filter", no_argument, NULL, OPT_no_filter},
 			{"debug", no_argument, NULL, OPT_debug},
+			{"notimeout", no_argument, NULL, OPT_notimeout},
 			{"quiet", no_argument, NULL, OPT_quiet},
 			{"help", no_argument, NULL, '?'},
 			{"proc-map", no_argument, NULL, OPT_procmap},
@@ -6126,6 +6165,7 @@ static void parse_record_options(int argc,
 			{"compression", required_argument, NULL, OPT_compression},
 			{"file-version", required_argument, NULL, OPT_file_ver},
 			{"proxy", required_argument, NULL, OPT_proxy},
+			{"temp", required_argument, NULL, OPT_temp},
 			{NULL, 0, NULL, 0}
 		};
 
@@ -6142,7 +6182,7 @@ static void parse_record_options(int argc,
 		 * all the arguments for this instance.
 		 */
 		if (c != 'B' && (c != 'A' || is_proxy) && c != OPT_name &&
-		    is_guest(ctx->instance)) {
+		    is_guest(ctx->instance) && c != OPT_proxy) {
 			add_arg(ctx->instance, c, opts, long_options, optarg);
 			if (c == 'C')
 				ctx->instance->flags |= BUFFER_FL_HAS_CLOCK;
@@ -6398,6 +6438,11 @@ static void parse_record_options(int argc,
 				}
 			}
 			break;
+		case OPT_temp:
+			if (ctx->temp)
+				die("Only one temp directory can be listed");
+			ctx->temp = optarg;
+			break;
 		case 'O':
 			check_instance_die(ctx->instance, "-O");
 			option = optarg;
@@ -6574,6 +6619,9 @@ static void parse_record_options(int argc,
 		case OPT_debug:
 			tracecmd_set_debug(true);
 			break;
+		case OPT_notimeout:
+			tracecmd_set_notimeout(true);
+			break;
 		case OPT_module:
 			check_instance_die(ctx->instance, "--module");
 			if (ctx->instance->filter_mod)
@@ -6605,7 +6653,6 @@ static void parse_record_options(int argc,
 		case OPT_compression:
 			cmd_check_die(ctx, CMD_start, *(argv+1), "--compression");
 			cmd_check_die(ctx, CMD_set, *(argv+1), "--compression");
-			cmd_check_die(ctx, CMD_extract, *(argv+1), "--compression");
 			cmd_check_die(ctx, CMD_stream, *(argv+1), "--compression");
 			cmd_check_die(ctx, CMD_profile, *(argv+1), "--compression");
 			if (strcmp(optarg, "any") && strcmp(optarg, "none") &&
@@ -6860,6 +6907,8 @@ static void record_trace(int argc, char **argv,
 
 	/* Save the state of tracing_on before starting */
 	for_all_instances(instance) {
+		if (ctx->temp)
+			instance->temp_dir = ctx->temp;
 		instance->output_file = strdup(ctx->output);
 		if (!instance->output_file)
 			die("Failed to allocate output file name for instance");

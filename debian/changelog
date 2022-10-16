@@ -1,3 +1,12 @@
+trace-cmd (3.1.4-1) unstable; urgency=medium
+
+  * Update to upstream v3.1.4
+    - Update symbols.
+    - Update copyright.
+  * Update Standards-Version to 4.6.1.0.
+
+ -- Sudip Mukherjee <sudipm.mukherjee@gmail.com>  Sun, 16 Oct 2022 22:17:55 +0100
+
 trace-cmd (3.1-1) unstable; urgency=medium
 
   * Update to upstream v3.1

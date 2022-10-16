@@ -9,6 +9,10 @@
 #include "event-parse.h"
 #include "tracefs.h"
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 struct tracecmd_input;
 
 enum tracecmd_open_flags {
@@ -48,6 +52,55 @@ int tracecmd_buffer_instances(struct tracecmd_input *handle);
 const char *tracecmd_buffer_instance_name(struct tracecmd_input *handle, int indx);
 struct tracecmd_input *tracecmd_buffer_instance_handle(struct tracecmd_input *handle, int indx);
 
+void tracecmd_set_private(struct tracecmd_input *handle, void *data);
+void *tracecmd_get_private(struct tracecmd_input *handle);
+
+int tracecmd_follow_event(struct tracecmd_input *handle,
+			  const char *system, const char *event_name,
+			  int (*callback)(struct tracecmd_input *handle,
+					  struct tep_event *,
+					  struct tep_record *,
+					  int, void *),
+			  void *callback_data);
+
+int tracecmd_iterate_events(struct tracecmd_input *handle,
+			    cpu_set_t *cpus, int cpu_size,
+			    int (*callback)(struct tracecmd_input *handle,
+					    struct tep_record *,
+					    int, void *),
+			    void *callback_data);
+int tracecmd_iterate_events_multi(struct tracecmd_input **handles,
+				  int nr_handles,
+				  int (*callback)(struct tracecmd_input *handle,
+						  struct tep_record *,
+						  int, void *),
+				  void *callback_data);
+
 void tracecmd_set_loglevel(enum tep_loglevel level);
+
+enum tracecmd_filters {
+	TRACECMD_FILTER_NONE		= TEP_ERRNO__NO_FILTER,
+	TRACECMD_FILTER_NOT_FOUND	= TEP_ERRNO__FILTER_NOT_FOUND,
+	TRACECMD_FILTER_MISS		= TEP_ERRNO__FILTER_MISS,
+	TRACECMD_FILTER_MATCH		= TEP_ERRNO__FILTER_MATCH,
+};
+
+struct tracecmd_filter;
+struct tracecmd_filter *tracecmd_filter_add(struct tracecmd_input *handle,
+					    const char *filter_str, bool neg);
+
+struct tracecmd_cpu_map;
+int tracecmd_map_vcpus(struct tracecmd_input **handles, int nr_handles);
+struct tracecmd_cpu_map *tracecmd_get_cpu_map(struct tracecmd_input *handle, int cpu);
+struct tracecmd_cpu_map *tracecmd_map_find_by_host_pid(struct tracecmd_input *handle,
+						      int host_pid);
+struct tracecmd_input *tracecmd_map_get_guest(struct tracecmd_cpu_map *map);
+int tracecmd_map_get_host_pid(struct tracecmd_cpu_map *map);
+void tracecmd_map_set_private(struct tracecmd_cpu_map *map, void *priv);
+void *tracecmd_map_get_private(struct tracecmd_cpu_map *map);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif /* _TRACE_CMD_H */

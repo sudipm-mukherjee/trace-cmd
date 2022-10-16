@@ -19,7 +19,8 @@ static struct usage_help usage_help[] = {
 		"record a trace into a trace.dat file",
 		" %s record [-v][-e event [-f filter]][-p plugin][-F][-d][-D][-o file] \\\n"
 		"           [-q][-s usecs][-O option ][-l func][-g func][-n func] \\\n"
-		"           [-P pid][-N host:port][-t][-r prio][-b size][-B buf][command ...]\n"
+		"           [-P pid][-N host:port][-t][-r prio][-b size][-B buf] \\\n"
+		"           [--proxy vsock][command ...]\n"
 		"           [-m max][-C clock]\n"
 		"          -e run command with event enabled\n"
 		"          -f filter for previous -e event\n"
@@ -53,6 +54,7 @@ static struct usage_help usage_help[] = {
 		"          -q print no output to the screen\n"
 		"          -G when profiling, set soft and hard irqs as global\n"
 		"          --quiet print no output to the screen\n"
+		"          --temp specify a directory to store the temp files used to create trace.dat\n"
 		"          --module filter module name\n"
 		"          --by-comm used with --profile, merge events for related comms\n"
 		"          --profile enable tracing options needed for report --profile\n"
@@ -77,6 +79,8 @@ static struct usage_help usage_help[] = {
 		"                            none - do not compress the trace file\n"
 		"                            name - the name of the desired compression algorithms\n"
 		"                        available algorithms can be listed with trace-cmd list -c\n"
+		"          --proxy vsocket to reach the agent. Acts the same as -A (for an agent)\n"
+		"              but will send the proxy connection to the agent.\n"
 	},
 	{
 		"set",
@@ -230,6 +234,8 @@ static struct usage_help usage_help[] = {
 		"          --cpu <cpu1,cpu2,...> - filter events according to the given cpu list.\n"
 		"                                  A range of CPUs can be specified using 'cpuX-cpuY' notation.\n"
 		"          --cpus - List the CPUs that have content in it then exit.\n"
+		"          --first-event - Show the timestamp of the first event for all CPUs.\n"
+		"          --last-event - Show the timestamp of the last event for all CPUs.\n"
 		"          --check-events return whether all event formats can be parsed\n"
 		"          --stat - show the buffer stats that were reported at the end of the record.\n"
 		"          --uname - show uname of the record, if it was saved\n"
@@ -328,13 +334,15 @@ static struct usage_help usage_help[] = {
 	{
 		"agent",
 		"listen on a vsocket for trace clients",
-		" %s agent -p port[-D]\n"
+		" %s agent -p port[-D][-N][-P cid]\n"
 		"          Creates a vsocket to listen for clients.\n"
 		"          -N Connect to IP via TCP instead of vsockets\n"
 		"             *** Insecure setting, only use on a trusted network ***\n"
 		"             ***   Only use if the client is totally trusted.    ***\n"
 		"          -p port number to listen on.\n"
 		"          -D run in daemon mode.\n"
+		"          -P Also act as a proxy server, with a single client denoted\n"
+		"             by a context ID (cid).\n"
 		"          --verbose 'level' Set the desired log level\n"
 	},
 	{

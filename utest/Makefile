@@ -8,9 +8,11 @@ TARGETS = $(bdir)/trace-utest
 
 OBJS =
 OBJS += trace-utest.o
-OBJS += tracefs-utest.o
+OBJS += tracecmd-utest.o
 
-LIBS += -lcunit $(LIBTRACEEVENT_LDLAGS) $(LIBTRACEFS_LDLAGS)
+LIBS += $(LIBTRACECMD_STATIC) -lcunit $(LIBTRACEEVENT_LDLAGS) $(LIBTRACEFS_LDLAGS)
+
+LIBS += $(ZLIB_LDLAGS) $(LIBZSTD_LDLAGS)
 
 OBJS := $(OBJS:%.o=$(bdir)/%.o)
 DEPS := $(OBJS:$(bdir)/%.o=$(bdir)/.%.d)

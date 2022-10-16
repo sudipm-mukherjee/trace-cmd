@@ -461,7 +461,7 @@ static int tracecmd_msg_recv_wait(int fd, struct tracecmd_msg *msg)
 
 	pfd.fd = fd;
 	pfd.events = POLLIN;
-	ret = poll(&pfd, 1, tracecmd_get_debug() ? -1 : msg_wait_to);
+	ret = poll(&pfd, 1, tracecmd_get_notimeout() ? -1 : msg_wait_to);
 	if (ret < 0)
 		return -errno;
 	else if (ret == 0)
@@ -979,6 +979,8 @@ int tracecmd_msg_read_data(struct tracecmd_msg_handle *msg_handle, int ofd)
 	int t, n;
 	ssize_t s;
 	int ret;
+
+	memset(&msg, 0, sizeof(msg));
 
 	while (!tracecmd_msg_done(msg_handle)) {
 		n = read_msg_data(msg_handle, &msg);

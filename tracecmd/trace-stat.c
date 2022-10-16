@@ -71,21 +71,24 @@ char *append_file(const char *dir, const char *name)
 
 static char *get_fd_content(int fd, const char *file)
 {
+	size_t total = 0;
+	size_t alloc;
 	char *str = NULL;
-	int cnt = 0;
 	int ret;
 
 	for (;;) {
-		str = realloc(str, BUFSIZ * ++cnt);
+		alloc = ((total + BUFSIZ) / BUFSIZ) * BUFSIZ;
+		str = realloc(str, alloc + 1);
 		if (!str)
 			die("malloc");
-		ret = read(fd, str + BUFSIZ * (cnt - 1), BUFSIZ);
+		ret = read(fd, str + total, alloc - total);
 		if (ret < 0)
 			die("reading %s\n", file);
-		if (ret < BUFSIZ)
+		total += ret;
+		if (!ret)
 			break;
 	}
-	str[BUFSIZ * (cnt-1) + ret] = 0;
+	str[total] = 0;
 
 	return str;
 }
@@ -815,6 +818,11 @@ static void report_uprobes(struct buffer_instance *instance)
 	report_probes(instance, "uprobe_events", "Uprobe events");
 }
 
+static void report_synthetic(struct buffer_instance *instance)
+{
+	report_probes(instance, "synthetic_events", "Synthetic events");
+}
+
 static void report_traceon(struct buffer_instance *instance)
 {
 	char *str;
@@ -856,9 +864,13 @@ static void stat_instance(struct buffer_instance *instance, bool opt)
 	report_file(instance, "tracing_max_latency", "0", "Max Latency: ");
 	report_kprobes(instance);
 	report_uprobes(instance);
+	report_synthetic(instance);
 	report_file(instance, "set_event_pid", "", "Filtered event PIDs:\n");
+	report_file(instance, "set_event_notrace_pid", "", "Filtered notrace event PIDs:\n");
 	report_file(instance, "set_ftrace_pid", "no pid",
 		    "Filtered function tracer PIDs:\n");
+	report_file(instance, "set_ftrace_notrace_pid", "no pid",
+		    "Filtered function tracer notrace PIDs:\n");
 	if (opt) {
 		printf("\nOptions:\n");
 		show_options("   ", instance);

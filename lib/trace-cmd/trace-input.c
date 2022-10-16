@@ -43,6 +43,15 @@ struct page_map {
 	int			ref_count;
 };
 
+struct follow_event {
+	struct tep_event	*event;
+	void			*callback_data;
+	int (*callback)(struct tracecmd_input *handle,
+			struct tep_event *,
+			struct tep_record *,
+			int, void *);
+};
+
 struct page {
 	struct list_head	list;
 	off64_t			offset;
@@ -160,6 +169,9 @@ struct tracecmd_input {
 	struct tep_handle	*pevent;
 	struct tep_plugin_list	*plugin_list;
 	struct tracecmd_input	*parent;
+	struct tracecmd_filter	*filter;
+	struct follow_event	*followers;
+	struct tracecmd_cpu_map *map;
 	unsigned long		file_state;
 	unsigned long long	trace_id;
 	unsigned long long	next_offset;
@@ -170,7 +182,9 @@ struct tracecmd_input {
 	int			page_map_size;
 	int			max_cpu;
 	int			cpus;
+	int			start_cpu;
 	int			ref;
+	int			nr_followers;
 	int			nr_buffers;	/* buffer instances */
 	bool			use_trace_clock;
 	bool			read_page;
@@ -178,6 +192,7 @@ struct tracecmd_input {
 	bool			read_zpage; /* uncompress pages in memory, do not use tmp files */
 	bool			cpu_compressed;
 	int			file_version;
+	int			map_cnt;
 	unsigned int		cpustats_size;
 	struct cpu_zdata	latz;
 	struct cpu_data 	*cpu_data;
@@ -214,6 +229,8 @@ struct tracecmd_input {
 
 	/* For custom profilers. */
 	tracecmd_show_data_func	show_data_func;
+
+	void			*private;
 };
 
 __thread struct tracecmd_input *tracecmd_curr_thread_handle;
@@ -242,6 +259,16 @@ unsigned long tracecmd_get_flags(struct tracecmd_input *handle)
 enum tracecmd_file_states tracecmd_get_file_state(struct tracecmd_input *handle)
 {
 	return handle->file_state;
+}
+
+void tracecmd_set_private(struct tracecmd_input *handle, void *data)
+{
+	handle->private = data;
+}
+
+void *tracecmd_get_private(struct tracecmd_input *handle)
+{
+	return handle->private;
 }
 
 #if DEBUG_RECORD
@@ -294,6 +321,34 @@ static const char *show_records(struct page **pages, int nr_pages)
 	return "";
 }
 #endif
+
+/**
+ * trace_set_guest_map - set map to input handle
+ * @handle: The handle to set the cpu map to
+ * @map: The cpu map for this handle (to the host)
+ *
+ * Assign the mapping of host to guest for a guest handle.
+ */
+__hidden void trace_set_guest_map(struct tracecmd_input *handle,
+				  struct tracecmd_cpu_map *map)
+{
+	handle->map = map;
+}
+
+__hidden struct tracecmd_cpu_map *trace_get_guest_map(struct tracecmd_input *handle)
+{
+	return handle->map;
+}
+
+__hidden void trace_set_guest_map_cnt(struct tracecmd_input *handle, int count)
+{
+	handle->map_cnt = count;
+}
+
+__hidden int trace_get_guest_map_cnt(struct tracecmd_input *handle)
+{
+	return handle->map_cnt;
+}
 
 static int init_cpu(struct tracecmd_input *handle, int cpu);
 
@@ -1285,7 +1340,7 @@ static int chunk_cmp(const void *A, const void *B)
 	if (CHUNK_CHECK_OFFSET(b, a->offset))
 		return 0;
 
-	if (b->offset < a->offset)
+	if (a->offset < b->offset)
 		return -1;
 
 	return 1;
@@ -1401,8 +1456,11 @@ static void *allocate_page_map(struct tracecmd_input *handle,
 	int ret;
 	int fd;
 
-	if (handle->cpu_compressed && handle->read_zpage)
-		return read_zpage(handle, cpu, offset);
+	if (handle->cpu_compressed) {
+		if (handle->read_zpage)
+			return read_zpage(handle, cpu, offset);
+		offset -= cpu_data->file_offset;
+	}
 
 	if (handle->read_page) {
 		map = malloc(handle->page_size);
@@ -1419,7 +1477,7 @@ static void *allocate_page_map(struct tracecmd_input *handle,
 	map_size = handle->page_map_size;
 	map_offset = offset & ~(map_size - 1);
 
-	if (map_offset < cpu_data->file_offset) {
+	if (!handle->cpu_compressed && map_offset < cpu_data->file_offset) {
 		map_size -= cpu_data->file_offset - map_offset;
 		map_offset = cpu_data->file_offset;
 	}
@@ -1442,10 +1500,9 @@ static void *allocate_page_map(struct tracecmd_input *handle,
 		map_size -= map_offset + map_size -
 			(cpu_data->file_offset + cpu_data->file_size);
 
-	if (cpu_data->compress.fd >= 0) {
-		map_offset -= cpu_data->file_offset;
+	if (cpu_data->compress.fd >= 0)
 		fd = cpu_data->compress.fd;
-	} else
+	else
 		fd = handle->fd;
  again:
 	page_map->size = map_size;
@@ -2510,6 +2567,265 @@ tracecmd_read_next_data(struct tracecmd_input *handle, int *rec_cpu)
 }
 
 /**
+ * tracecmd_follow_event - Add callback for specific events for iterators
+ * @handle: The handle to get a callback from
+ * @system: The system of the event to track
+ * @event_name: The name of the event to track
+ * @callback: The function to call when the event is hit in an iterator
+ * @callback_data: The data to pass to @callback
+ *
+ * This attaches a callback to @handle where if tracecmd_iterate_events()
+ * or tracecmd_iterate_events_multi() is called, that if the specified
+ * event is hit, it will call @callback, with the following parameters:
+ *  @handle: Same handle as passed to this function.
+ *  @event: The event pointer that was found by @system and @event_name.
+ *  @record; The event instance of @event.
+ *  @cpu: The cpu that the event happened on.
+ *  @callback_data: The same as @callback_data passed to the function.
+ *
+ * Note that when used with tracecmd_iterate_events_multi() that @cpu
+ * may be the nth CPU of all handles it is processing, so if the CPU
+ * that the @record is on is desired, then use @record->cpu.
+ *
+ * Returns 0 on success and -1 on error.
+ */
+int tracecmd_follow_event(struct tracecmd_input *handle,
+			  const char *system, const char *event_name,
+			  int (*callback)(struct tracecmd_input *handle,
+					  struct tep_event *,
+					  struct tep_record *,
+					  int, void *),
+			  void *callback_data)
+{
+	struct tep_handle *tep = tracecmd_get_tep(handle);
+	struct follow_event *followers;
+	struct follow_event follow;
+
+	if (!tep) {
+		errno = EINVAL;
+		return -1;
+	}
+
+	follow.event = tep_find_event_by_name(tep, system, event_name);
+	if (!follow.event) {
+		errno = ENOENT;
+		return -1;
+	}
+
+	follow.callback = callback;
+	follow.callback_data = callback_data;
+
+	followers = realloc(handle->followers, sizeof(*followers) *
+			    (handle->nr_followers + 1));
+	if (!followers)
+		return -1;
+
+	handle->followers = followers;
+	followers[handle->nr_followers++] = follow;
+
+	return 0;
+}
+
+static int call_followers(struct tracecmd_input *handle,
+			  struct tep_record *record, int cpu)
+{
+	struct tep_handle *tep = tracecmd_get_tep(handle);
+	struct follow_event *followers = handle->followers;
+	struct tep_event *event;
+	int ret = 0;
+	int i;
+
+	event = tep_find_event_by_record(tep, record);
+	if (!event)
+		return -1;
+
+	for (i = 0; i < handle->nr_followers; i++) {
+		if (handle->followers[i].event == event)
+			ret |= followers[i].callback(handle, event, record,
+						     cpu, followers[i].callback_data);
+	}
+
+	return ret;
+}
+
+/**
+ * tracecmd_iterate_events - iterate events over a given handle
+ * @handle: The handle to iterate over
+ * @cpus: The CPU set to filter on (NULL for all CPUs)
+ * @cpu_size: The size of @cpus (ignored if @cpus is NULL)
+ * @callback: The callback function for each event
+ * @callback_data: The data to pass to the @callback.
+ *
+ * Will loop over all events in @handle (filtered by the given @cpus),
+ * and will call @callback for each event in order of the event's records
+ * timestamp.
+ *
+ * Returns the -1 on error, or the value of the callbacks.
+ */
+int tracecmd_iterate_events(struct tracecmd_input *handle,
+			    cpu_set_t *cpus, int cpu_size,
+			    int (*callback)(struct tracecmd_input *handle,
+					    struct tep_record *,
+					    int, void *),
+			    void *callback_data)
+{
+	struct tep_record **records;
+	struct tep_record *record;
+	unsigned long long last_timestamp = 0;
+	int next_cpu;
+	int cpu;
+	int ret = 0;
+
+	if (!callback && !handle->nr_followers) {
+		errno = EINVAL;
+		return -1;
+	}
+
+	records = calloc(handle->max_cpu, sizeof(*records));
+	if (!records)
+		return -1;
+
+	for (cpu = 0; cpu < handle->max_cpu; cpu++) {
+		if (cpus && !CPU_ISSET_S(cpu, cpu_size, cpus))
+			continue;
+
+		records[cpu] = tracecmd_peek_data(handle, cpu);
+	}
+
+	do {
+		next_cpu = -1;
+		for (cpu = 0; cpu < handle->max_cpu; cpu++) {
+			record = records[cpu];
+			if (!record)
+				continue;
+
+			if (next_cpu < 0 || record->ts < last_timestamp) {
+				next_cpu = cpu;
+				last_timestamp = record->ts;
+			}
+		}
+		if (next_cpu >= 0) {
+			/* Need to call read_data to increment to the next record */
+			record = tracecmd_read_data(handle, next_cpu);
+			records[next_cpu] = tracecmd_peek_data(handle, next_cpu);
+
+			if (!handle->filter ||
+			    tracecmd_filter_match(handle->filter, record) == TRACECMD_FILTER_MATCH) {
+				if (handle->nr_followers)
+					ret = call_followers(handle, record, next_cpu);
+				if (!ret && callback)
+					ret = callback(handle, record, next_cpu, callback_data);
+			}
+			tracecmd_free_record(record);
+		}
+	} while (next_cpu >= 0 && ret >= 0);
+
+	for (cpu = 0; cpu < handle->max_cpu; cpu++)
+		tracecmd_free_record(records[cpu]);
+
+	free(records);
+
+	return ret;
+}
+
+struct record_handle {
+	struct tep_record		*record;
+	struct tracecmd_input		*handle;
+};
+
+/**
+ * tracecmd_iterate_events_multi - iterate events over multiple handles
+ * @handles: An array of handles to iterate over
+ * @nr_handles: The number of handles in the @handles array.
+ * @callback: The callback function for each event
+ * @callback_data: The data to pass to the @callback.
+ *
+ * Will loop over all CPUs for each handle in @handles and call the
+ * @callback in the order of the timestamp for each event's record
+ * for each handle.
+ *
+ * Returns the -1 on error, or the value of the callbacks.
+ */
+int tracecmd_iterate_events_multi(struct tracecmd_input **handles,
+				  int nr_handles,
+				  int (*callback)(struct tracecmd_input *handle,
+						  struct tep_record *,
+						  int, void *),
+				  void *callback_data)
+{
+	struct tracecmd_input *handle;
+	struct record_handle *records;
+	struct tep_record *record;
+	unsigned long long last_timestamp = 0;
+	int next_cpu;
+	int cpus = 0;
+	int all_cpus = 0;
+	int cpu;
+	int i;
+	int ret = 0;
+
+	for (i = 0; i < nr_handles; i++) {
+		handle = handles[i];
+		cpus += handle->max_cpu;
+	}
+
+	records = calloc(cpus, sizeof(*records));
+	if (!records)
+		return -1;
+
+	for (i = 0; i < nr_handles; i++) {
+		handle = handles[i];
+		handle->start_cpu = all_cpus;
+		for (cpu = 0; cpu < handle->max_cpu; cpu++) {
+			records[all_cpus + cpu].record = tracecmd_peek_data(handle, cpu);
+			records[all_cpus + cpu].handle = handle;
+		}
+		all_cpus += cpu;
+	}
+
+	do {
+		next_cpu = -1;
+		for (cpu = 0; cpu < all_cpus; cpu++) {
+			record = records[cpu].record;
+			if (!record)
+				continue;
+
+			if (next_cpu < 0 || record->ts < last_timestamp) {
+				next_cpu = cpu;
+				last_timestamp = record->ts;
+			}
+		}
+		if (next_cpu >= 0) {
+			record = records[next_cpu].record;
+			handle = records[next_cpu].handle;
+			cpu = next_cpu - handle->start_cpu;
+			/* Need to call read_data to increment to the next record */
+			record = tracecmd_read_data(handle, cpu);
+			records[next_cpu].record = tracecmd_peek_data(handle, cpu);
+
+			if (!handle->filter ||
+			    tracecmd_filter_match(handle->filter, record) == TRACECMD_FILTER_MATCH) {
+				if (handle->nr_followers)
+					ret = call_followers(handle, record, next_cpu);
+
+				if (!ret && callback)
+					ret = callback(handle, record, next_cpu, callback_data);
+			}
+			tracecmd_free_record(record);
+		}
+
+	} while (next_cpu >= 0 && ret >= 0);
+
+	/*
+	 * The records array contains only records that were taken via
+	 * tracecmd_peek_data(), and do not need to be freed.
+	 */
+	free(records);
+
+	return ret;
+}
+
+/**
  * tracecmd_peek_next_data - return the next record
  * @handle: input handle to the trace.dat file
  * @rec_cpu: return pointer to the CPU that the record belongs to
@@ -2699,13 +3015,14 @@ static int init_cpu_zpage(struct tracecmd_input *handle, int cpu)
 	cpu_data->compress.last_chunk = 0;
 
 	cpu_data->file_offset = handle->next_offset;
+	cpu_data->file_size = 0;
 
 	for (i = 0; i < count; i++)
 		cpu_data->file_size += cpu_data->compress.chunks[i].size;
 
 	cpu_data->offset = cpu_data->file_offset;
 	cpu_data->size = cpu_data->file_size;
-	handle->next_offset = (handle->next_offset + cpu_data->size + handle->page_size - 1) &
+	handle->next_offset = (handle->next_offset + cpu_data->file_size + handle->page_size - 1) &
 		~(handle->page_size - 1);
 	return 0;
 }
@@ -3483,6 +3800,8 @@ static int handle_options(struct tracecmd_input *handle)
 								 buf + 4, 4);
 			handle->tsc_calc.offset = tep_read_number(handle->pevent,
 								  buf + 8, 8);
+			if (!(handle->flags & TRACECMD_FL_RAW_TS))
+				handle->flags |= TRACECMD_FL_IN_USECS;
 			break;
 		case TRACECMD_OPTION_HEADER_INFO:
 		case TRACECMD_OPTION_FTRACE_EVENTS:
@@ -3864,6 +4183,10 @@ static void extract_trace_clock(struct tracecmd_input *handle, char *line)
 	/* Clear usecs if raw timestamps are requested */
 	if (handle->flags & TRACECMD_FL_RAW_TS)
 		handle->flags &= ~TRACECMD_FL_IN_USECS;
+
+	/* tsc_calc is a conversion to nanoseconds */
+	if (handle->tsc_calc.mult)
+		return;
 
 	/* Clear usecs if not one of the specified clocks */
 	if (strcmp(clock, "local") && strcmp(clock, "global") &&
@@ -4508,6 +4831,7 @@ void tracecmd_close(struct tracecmd_input *handle)
 	free(handle->trace_clock);
 	free(handle->strings);
 	free(handle->version);
+	trace_guest_map_free(handle->map);
 	close(handle->fd);
 	free(handle->latz.chunks);
 	if (handle->latz.fd >= 0) {
@@ -4533,6 +4857,8 @@ void tracecmd_close(struct tracecmd_input *handle)
 
 	trace_tsync_offset_free(&handle->host);
 	trace_guests_free(handle);
+
+	tracecmd_filter_free(handle->filter);
 
 	if (handle->flags & TRACECMD_FL_BUFFER_INSTANCE)
 		tracecmd_close(handle->parent);
@@ -5375,12 +5701,14 @@ static int copy_trace_data_from_v6(struct tracecmd_input *in_handle,
 static int copy_trace_data_from_v7(struct tracecmd_input *in_handle,
 				   struct tracecmd_output *out_handle)
 {
-	int ret = 0;
+	int ret;
 	int i;
 
 	/* Force using temporary files for trace data decompression */
 	in_handle->read_zpage = false;
-	tracecmd_init_data(in_handle);
+	ret = tracecmd_init_data(in_handle);
+	if (ret < 0)
+		return ret;
 	tracecmd_set_out_clock(out_handle, in_handle->trace_clock);
 
 	/* copy top buffer */
@@ -5874,3 +6202,19 @@ int tracecmd_enable_tsync(struct tracecmd_input *handle, bool enable)
 	return 0;
 }
 
+__hidden struct tracecmd_filter *tracecmd_filter_get(struct tracecmd_input *handle)
+{
+	return handle->filter;
+}
+
+__hidden void tracecmd_filter_set(struct tracecmd_input *handle,
+				  struct tracecmd_filter *filter)
+{
+	/* This can be used to set filter to NULL though. */
+	if (handle->filter && filter) {
+		tracecmd_warning("Filter exists and setting a new one");
+		return;
+	}
+
+	handle->filter = filter;
+}

@@ -2,7 +2,7 @@
 # trace-cmd version
 TC_VERSION = 3
 TC_PATCHLEVEL = 1
-TC_EXTRAVERSION = 0
+TC_EXTRAVERSION = 4
 TRACECMD_VERSION = $(TC_VERSION).$(TC_PATCHLEVEL).$(TC_EXTRAVERSION)
 
 export TC_VERSION
@@ -11,8 +11,8 @@ export TC_EXTRAVERSION
 export TRACECMD_VERSION
 
 LIBTC_VERSION = 1
-LIBTC_PATCHLEVEL = 1
-LIBTC_EXTRAVERSION = 3
+LIBTC_PATCHLEVEL = 2
+LIBTC_EXTRAVERSION = 0
 LIBTRACECMD_VERSION = $(LIBTC_VERSION).$(LIBTC_PATCHLEVEL).$(LIBTC_EXTRAVERSION)
 
 export LIBTC_VERSION
@@ -216,7 +216,7 @@ export pkgconfig_dir PKG_CONFIG_FILE
 
 export prefix bindir src obj
 
-LIBS = -ldl
+LIBS ?= -ldl
 
 LIBTRACECMD_DIR = $(obj)/lib/trace-cmd
 LIBTRACECMD_STATIC = $(LIBTRACECMD_DIR)/libtracecmd.a
@@ -316,10 +316,14 @@ endif
 ZLIB_INSTALLED := $(shell if (printf "$(pound)include <zlib.h>\n void main(){deflateInit(NULL, Z_BEST_COMPRESSION);}" | $(CC) -o /dev/null -x c - -lz >/dev/null 2>&1) ; then echo 1; else echo 0 ; fi)
 ifeq ($(ZLIB_INSTALLED), 1)
 export ZLIB_INSTALLED
+ZLIB_LDLAGS = -lz
 CFLAGS += -DHAVE_ZLIB
 $(info    Have zlib compression support)
 endif
 
+export ZLIB_LDLAGS
+
+ifndef NO_LIBZSTD
 TEST_LIBZSTD = $(shell sh -c "$(PKG_CONFIG) --atleast-version 1.4.0 libzstd > /dev/null 2>&1 && echo y")
 
 ifeq ("$(TEST_LIBZSTD)", "y")
@@ -335,6 +339,7 @@ $(info	  *************************************************************)
 endif
 
 export LIBZSTD_CFLAGS LIBZSTD_LDLAGS ZSTD_INSTALLED
+endif
 
 CUNIT_INSTALLED := $(shell if (printf "$(pound)include <CUnit/Basic.h>\n void main(){CU_initialize_registry();}" | $(CC) -o /dev/null -x c - -lcunit >/dev/null 2>&1) ; then echo 1; else echo 0 ; fi)
 export CUNIT_INSTALLED
@@ -442,7 +447,7 @@ gui: force
 	@echo "  Please use its new home at https://git.kernel.org/pub/scm/utils/trace-cmd/kernel-shark.git/"
 	@echo "***************************"
 
-test: force $(LIBTRACECMD_STATIC)
+test: force trace-cmd
 ifneq ($(CUNIT_INSTALLED),1)
 	$(error CUnit framework not installed, cannot build unit tests))
 endif
@@ -503,7 +508,7 @@ install_gui: force
 install_libs: libs
 	$(Q)$(MAKE) -C $(src)/lib/trace-cmd/ $@
 
-doc:
+doc: check_doc
 	$(MAKE) -C $(src)/Documentation all
 
 doc_clean:
@@ -511,6 +516,9 @@ doc_clean:
 
 install_doc:
 	$(MAKE) -C $(src)/Documentation install
+
+check_doc: force
+	$(Q)$(src)/check-manpages.sh $(src)/Documentation/libtracecmd
 
 clean:
 	$(RM) *.o *~ *.a *.so .*.d

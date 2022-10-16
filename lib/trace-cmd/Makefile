@@ -15,8 +15,10 @@ OBJS += trace-output.o
 OBJS += trace-recorder.o
 OBJS += trace-util.o
 OBJS += trace-filter-hash.o
+OBJS += trace-filter.o
 OBJS += trace-msg.o
 OBJS += trace-plugin.o
+OBJS += trace-maps.o
 ifeq ($(PERF_DEFINED), 1)
 OBJS += trace-perf.o
 endif
@@ -51,11 +53,9 @@ $(DEPS): | $(bdir)
 $(LIBTRACECMD_STATIC): $(OBJS)
 	$(Q)$(call do_build_static_lib)
 
-LIBS = $(LIBTRACEEVENT_LDLAGS) $(LIBTRACEFS_LDLAGS) $(LIBZSTD_LDLAGS) -lpthread
+LPTHREAD ?= -lpthread
 
-ifeq ($(ZLIB_INSTALLED), 1)
-LIBS += -lz
-endif
+LIBS = $(LIBTRACEEVENT_LDLAGS) $(LIBTRACEFS_LDLAGS) $(ZLIB_LDLAGS) $(LIBZSTD_LDLAGS) $(LPTHREAD)
 
 $(LIBTRACECMD_SHARED_VERSION): $(LIBTRACECMD_SHARED)
 	@ln -sf $(<F) $@

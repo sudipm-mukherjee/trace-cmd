@@ -3,7 +3,6 @@
  * Copyright (C) 2009, 2010 Red Hat Inc, Steven Rostedt <srostedt@redhat.com>
  *
  */
-#define _LARGEFILE64_SOURCE
 #include <dirent.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -195,7 +194,7 @@ static void print_event(struct trace_seq *s, struct tracecmd_input *handle,
 #define TEST_READ_AT 0
 #if TEST_READ_AT
 #define DO_TEST
-static off64_t test_read_at_offset;
+static off_t test_read_at_offset;
 static int test_read_at_copy = 100;
 static int test_read_at_index;
 static void show_test(struct tracecmd_input *handle)
@@ -1564,6 +1563,8 @@ void trace_report (int argc, char **argv)
 		usage(argv);
 
 	signal(SIGINT, sig_end);
+
+	trace_set_loglevel(TEP_LOG_ERROR);
 
 	for (;;) {
 		int option_index = 0;

@@ -106,7 +106,7 @@ const char *tracecmd_get_trace_clock(struct tracecmd_input *handle);
 const char *tracecmd_get_cpustats(struct tracecmd_input *handle);
 const char *tracecmd_get_uname(struct tracecmd_input *handle);
 const char *tracecmd_get_version(struct tracecmd_input *handle);
-off64_t tracecmd_get_cpu_file_size(struct tracecmd_input *handle, int cpu);
+off_t tracecmd_get_cpu_file_size(struct tracecmd_input *handle, int cpu);
 
 static inline int tracecmd_host_bigendian(void)
 {
@@ -336,11 +336,12 @@ int tracecmd_write_buffer_info(struct tracecmd_output *handle);
 
 int tracecmd_write_cpus(struct tracecmd_output *handle, int cpus);
 int tracecmd_write_cmdlines(struct tracecmd_output *handle);
-int tracecmd_prepare_options(struct tracecmd_output *handle, off64_t offset, int whence);
+int tracecmd_prepare_options(struct tracecmd_output *handle, off_t offset, int whence);
 int tracecmd_write_options(struct tracecmd_output *handle);
 int tracecmd_write_meta_strings(struct tracecmd_output *handle);
 int tracecmd_append_options(struct tracecmd_output *handle);
 void tracecmd_output_close(struct tracecmd_output *handle);
+void tracecmd_output_flush(struct tracecmd_output *handle);
 void tracecmd_output_free(struct tracecmd_output *handle);
 struct tracecmd_output *tracecmd_copy(struct tracecmd_input *ihandle, const char *file,
 				      enum tracecmd_file_states state, int file_version,
@@ -371,13 +372,13 @@ struct tracecmd_recorder *tracecmd_create_recorder(const char *file, int cpu, un
 struct tracecmd_recorder *tracecmd_create_recorder_fd(int fd, int cpu, unsigned flags);
 struct tracecmd_recorder *tracecmd_create_recorder_virt(const char *file, int cpu, unsigned flags, int trace_fd);
 struct tracecmd_recorder *tracecmd_create_recorder_maxkb(const char *file, int cpu, unsigned flags, int maxkb);
-struct tracecmd_recorder *tracecmd_create_buffer_recorder_fd(int fd, int cpu, unsigned flags, const char *buffer);
-struct tracecmd_recorder *tracecmd_create_buffer_recorder(const char *file, int cpu, unsigned flags, const char *buffer);
-struct tracecmd_recorder *tracecmd_create_buffer_recorder_maxkb(const char *file, int cpu, unsigned flags, const char *buffer, int maxkb);
+struct tracecmd_recorder *tracecmd_create_buffer_recorder_fd(int fd, int cpu, unsigned flags, struct tracefs_instance *instance);
+struct tracecmd_recorder *tracecmd_create_buffer_recorder(const char *file, int cpu, unsigned flags, struct tracefs_instance *instance);
+struct tracecmd_recorder *tracecmd_create_buffer_recorder_maxkb(const char *file, int cpu, unsigned flags, struct tracefs_instance *instance, int maxkb);
 
 int tracecmd_start_recording(struct tracecmd_recorder *recorder, unsigned long sleep);
-void tracecmd_stop_recording(struct tracecmd_recorder *recorder);
-long tracecmd_flush_recording(struct tracecmd_recorder *recorder);
+int tracecmd_stop_recording(struct tracecmd_recorder *recorder);
+long tracecmd_flush_recording(struct tracecmd_recorder *recorder, bool finish);
 
 enum tracecmd_msg_flags {
 	TRACECMD_MSG_FL_USE_TCP		= 1 << 0,
@@ -393,7 +394,7 @@ struct tracecmd_msg_handle {
 	short			cpu_count;
 	short			version;	/* Current protocol version */
 	unsigned long		flags;
-	off64_t			cache_start_offset;
+	off_t			cache_start_offset;
 	bool			done;
 	bool			cache;
 	int			cfd;
@@ -542,8 +543,8 @@ int tracecmd_write_guest_time_shift(struct tracecmd_output *handle,
 struct tracecmd_compress_chunk {
 	unsigned int		size;
 	unsigned int		zsize;
-	off64_t			zoffset;
-	off64_t			offset;
+	off_t			zoffset;
+	off_t			offset;
 };
 struct tracecmd_compression;
 struct tracecmd_compression_proto {
@@ -569,7 +570,7 @@ int tracecmd_compress_buffer_read(struct tracecmd_compression *handle, char *dst
 int tracecmd_compress_pread(struct tracecmd_compression *handle, char *dst, int len, off_t offset);
 int tracecmd_compress_buffer_write(struct tracecmd_compression *handle,
 				   const void *data, unsigned long long size);
-off64_t tracecmd_compress_lseek(struct tracecmd_compression *handle, off64_t offset, int whence);
+off_t tracecmd_compress_lseek(struct tracecmd_compression *handle, off_t offset, int whence);
 int tracecmd_compress_proto_get_name(struct tracecmd_compression *compress,
 				     const char **name, const char **version);
 bool tracecmd_compress_is_supported(const char *name, const char *version);

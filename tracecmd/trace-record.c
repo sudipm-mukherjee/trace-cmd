@@ -73,7 +73,7 @@ static int rt_prio;
 static int keep;
 
 static int latency;
-static int sleep_time = 1000;
+static long sleep_time = 1000;
 static int recorder_threads;
 static struct pid_record_data *pids;
 static int buffers;
@@ -798,7 +798,7 @@ static void stop_threads(enum trace_type type)
 	/* Flush out the pipes */
 	if (type & TRACE_TYPE_STREAM) {
 		do {
-			ret = trace_stream_read(pids, recorder_threads, NULL);
+			ret = trace_stream_read(pids, recorder_threads, 0);
 		} while (ret > 0);
 	}
 }
@@ -1306,7 +1306,6 @@ static void update_task_filter(void)
 
 static pid_t trace_waitpid(enum trace_type type, pid_t pid, int *status, int options)
 {
-	struct timeval tv = { 1, 0 };
 	int ret;
 
 	if (type & TRACE_TYPE_STREAM)
@@ -1318,7 +1317,7 @@ static pid_t trace_waitpid(enum trace_type type, pid_t pid, int *status, int opt
 			return ret;
 
 		if (type & TRACE_TYPE_STREAM)
-			trace_stream_read(pids, recorder_threads, &tv);
+			trace_stream_read(pids, recorder_threads, sleep_time);
 	} while (1);
 }
 
@@ -1639,13 +1638,21 @@ static inline void ptrace_attach(struct buffer_instance *instance, int pid) { }
 
 static void trace_or_sleep(enum trace_type type, bool pwait)
 {
-	struct timeval tv = { 1 , 0 };
+	int i;
 
 	if (pwait)
 		ptrace_wait(type);
-	else if (type & TRACE_TYPE_STREAM)
-		trace_stream_read(pids, recorder_threads, &tv);
-	else
+	else if (type & TRACE_TYPE_STREAM) {
+		/* Returns zero if it did not read anything (and did a sleep) */
+		if (trace_stream_read(pids, recorder_threads, sleep_time) > 0)
+			return;
+		/* Force a flush if nothing was read (including on errors) */
+		for (i = 0; i < recorder_threads; i++) {
+			if (pids[i].pid > 0) {
+				kill(pids[i].pid, SIGUSR2);
+			}
+		}
+	} else
 		sleep(10);
 }
 
@@ -3155,12 +3162,42 @@ static void expand_event_list(void)
 		expand_event_instance(instance);
 }
 
-static void finish(int sig)
+static void finish(void)
 {
+	static int secs = 1;
+
+	sleep_time = 0;
+
 	/* all done */
-	if (recorder)
+	if (recorder) {
 		tracecmd_stop_recording(recorder);
+		/*
+		 * We could just call the alarm if the above returned non zero,
+		 * as zero is suppose to guarantee that the reader woke up.
+		 * But as this is called from a signal handler, that may not
+		 * necessarily be the case.
+		 */
+		alarm(secs++);
+	}
 	finished = 1;
+}
+
+static void flush(void)
+{
+	if (recorder)
+		tracecmd_flush_recording(recorder, false);
+}
+
+static void do_sig(int sig)
+{
+	switch (sig) {
+	case SIGALRM:
+	case SIGUSR1:
+	case SIGINT:
+		return finish();
+	case SIGUSR2:
+		return flush();
+	}
 }
 
 static struct addrinfo *do_getaddrinfo(const char *host, unsigned int port,
@@ -3326,19 +3363,11 @@ create_recorder_instance_pipe(struct buffer_instance *instance,
 {
 	struct tracecmd_recorder *recorder;
 	unsigned flags = recorder_flags | TRACECMD_RECORD_BLOCK_SPLICE;
-	char *path;
-
-	path = tracefs_instance_get_dir(instance->tracefs);
-
-	if (!path)
-		die("malloc");
 
 	/* This is already the child */
 	close(brass[0]);
 
-	recorder = tracecmd_create_buffer_recorder_fd(brass[1], cpu, flags, path);
-
-	tracefs_put_tracing_file(path);
+	recorder = tracecmd_create_buffer_recorder_fd(brass[1], cpu, flags, instance->tracefs);
 
 	return recorder;
 }
@@ -3349,7 +3378,6 @@ create_recorder_instance(struct buffer_instance *instance, const char *file, int
 {
 	struct tracecmd_recorder *record;
 	struct addrinfo *result;
-	char *path;
 
 	if (is_guest(instance)) {
 		int fd;
@@ -3386,12 +3414,8 @@ create_recorder_instance(struct buffer_instance *instance, const char *file, int
 	if (!tracefs_instance_get_name(instance->tracefs))
 		return tracecmd_create_recorder_maxkb(file, cpu, recorder_flags, max_kb);
 
-	path = tracefs_instance_get_dir(instance->tracefs);
-
 	record = tracecmd_create_buffer_recorder_maxkb(file, cpu, recorder_flags,
-						       path, max_kb);
-	tracefs_put_tracing_file(path);
-
+						       instance->tracefs, max_kb);
 	return record;
 }
 
@@ -3402,6 +3426,7 @@ create_recorder_instance(struct buffer_instance *instance, const char *file, int
 static int create_recorder(struct buffer_instance *instance, int cpu,
 			   enum trace_type type, int *brass)
 {
+	struct tracefs_instance *recorder_instance = NULL;
 	long ret;
 	char *file;
 	pid_t pid;
@@ -3416,7 +3441,9 @@ static int create_recorder(struct buffer_instance *instance, int cpu,
 			return pid;
 
 		signal(SIGINT, SIG_IGN);
-		signal(SIGUSR1, finish);
+		signal(SIGUSR1, do_sig);
+		signal(SIGUSR2, do_sig);
+		signal(SIGALRM, do_sig);
 
 		if (rt_prio)
 			set_prio(rt_prio);
@@ -3427,7 +3454,6 @@ static int create_recorder(struct buffer_instance *instance, int cpu,
 
 	if ((instance->client_ports && !is_guest(instance)) || is_agent(instance)) {
 		unsigned int flags = recorder_flags;
-		char *path = NULL;
 		int fd;
 
 		if (is_agent(instance)) {
@@ -3449,19 +3475,10 @@ static int create_recorder(struct buffer_instance *instance, int cpu,
 		}
 		if (fd < 0)
 			die("Failed connecting to client");
-		if (tracefs_instance_get_name(instance->tracefs) && !is_agent(instance)) {
-			path = tracefs_instance_get_dir(instance->tracefs);
-		} else {
-			const char *dir = tracefs_tracing_dir();
+		if (tracefs_instance_get_name(instance->tracefs) && !is_agent(instance))
+			recorder_instance = instance->tracefs;
 
-			if (dir)
-				path = strdup(dir);
-		}
-		if (!path)
-			die("can't get the tracing directory");
-
-		recorder = tracecmd_create_buffer_recorder_fd(fd, cpu, flags, path);
-		tracefs_put_tracing_file(path);
+		recorder = tracecmd_create_buffer_recorder_fd(fd, cpu, flags, recorder_instance);
 	} else {
 		file = get_temp_file(instance, cpu);
 		recorder = create_recorder_instance(instance, file, cpu, brass);
@@ -3472,7 +3489,7 @@ static int create_recorder(struct buffer_instance *instance, int cpu,
 		die ("can't create recorder");
 
 	if (type == TRACE_TYPE_EXTRACT) {
-		ret = tracecmd_flush_recording(recorder);
+		ret = tracecmd_flush_recording(recorder, true);
 		tracecmd_free_recorder(recorder);
 		recorder = NULL;
 		return ret;
@@ -6966,7 +6983,7 @@ static void record_trace(int argc, char **argv,
 	allocate_seq();
 
 	if (type & (TRACE_TYPE_RECORD | TRACE_TYPE_STREAM)) {
-		signal(SIGINT, finish);
+		signal(SIGINT, do_sig);
 		if (!latency)
 			start_threads(type, ctx);
 	}
@@ -7013,6 +7030,9 @@ static void record_trace(int argc, char **argv,
 		}
 		while (!finished && wait_indefinitely)
 			trace_or_sleep(type, pwait);
+		/* Streams need to be flushed one more time */
+		if (type & TRACE_TYPE_STREAM)
+			trace_stream_read(pids, recorder_threads, -1);
 	}
 
 	tell_guests_to_stop(ctx);
@@ -7155,10 +7175,14 @@ void trace_stream(int argc, char **argv)
 {
 	struct common_record_context ctx;
 
+	/* Default sleep time is half a second for streaming */
+	sleep_time = 500000;
+
 	parse_record_options(argc, argv, CMD_stream, &ctx);
 	record_trace_command(argc, argv, &ctx);
 	exit(0);
 }
+
 
 void trace_profile(int argc, char **argv)
 {

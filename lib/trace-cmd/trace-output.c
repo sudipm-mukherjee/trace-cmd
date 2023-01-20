@@ -3,7 +3,6 @@
  * Copyright (C) 2009, 2010 Red Hat Inc, Steven Rostedt <srostedt@redhat.com>
  *
  */
-#define _LARGEFILE64_SOURCE
 #include <dirent.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -112,7 +111,7 @@ do_write_check(struct tracecmd_output *handle, const void *data, long long size)
 	return __do_write_check(handle->fd, data, size);
 }
 
-static inline off64_t do_lseek(struct tracecmd_output *handle, off_t offset, int whence)
+static inline off_t do_lseek(struct tracecmd_output *handle, off_t offset, int whence)
 {
 	if (handle->do_compress)
 		return tracecmd_compress_lseek(handle->compress, offset, whence);
@@ -120,7 +119,7 @@ static inline off64_t do_lseek(struct tracecmd_output *handle, off_t offset, int
 	if (handle->msg_handle)
 		return msg_lseek(handle->msg_handle, offset, whence);
 
-	return lseek64(handle->fd, offset, whence);
+	return lseek(handle->fd, offset, whence);
 }
 
 static inline int do_preed(struct tracecmd_output *handle, void *dst, int len, off_t offset)
@@ -281,7 +280,7 @@ void tracecmd_output_free(struct tracecmd_output *handle)
 	free(handle);
 }
 
-void tracecmd_output_close(struct tracecmd_output *handle)
+void tracecmd_output_flush(struct tracecmd_output *handle)
 {
 	if (!handle)
 		return;
@@ -293,6 +292,14 @@ void tracecmd_output_close(struct tracecmd_output *handle)
 		/* write strings section */
 		save_string_section(handle, true);
 	}
+}
+
+void tracecmd_output_close(struct tracecmd_output *handle)
+{
+	if (!handle)
+		return;
+
+	tracecmd_output_flush(handle);
 
 	if (handle->fd >= 0) {
 		close(handle->fd);
@@ -518,12 +525,12 @@ out_write_section_header(struct tracecmd_output *handle, unsigned short header_i
 	/* Section ID */
 	endian2 = convert_endian_2(handle, header_id);
 	if (do_write_check(handle, &endian2, 2))
-		return (off64_t)-1;
+		return (off_t)-1;
 
 	/* Section flags */
 	endian2 = convert_endian_2(handle, flags);
 	if (do_write_check(handle, &endian2, 2))
-		return (off64_t)-1;
+		return (off_t)-1;
 
 	/* Section description */
 	if (description)
@@ -532,13 +539,13 @@ out_write_section_header(struct tracecmd_output *handle, unsigned short header_i
 		desc = -1;
 	endian4 = convert_endian_4(handle, desc);
 	if (do_write_check(handle, &endian4, 4))
-		return (off64_t)-1;
+		return (off_t)-1;
 
 	offset = do_lseek(handle, 0, SEEK_CUR);
 	size = 0;
 	/* Reserve for section size */
 	if (do_write_check(handle, &size, 8))
-		return (off64_t)-1;
+		return (off_t)-1;
 	return offset;
 }
 
@@ -559,13 +566,13 @@ __hidden int out_update_section_header(struct tracecmd_output *handle, tsize_t o
 	if (size < 8)
 		return -1;
 	size -= 8;
-	if (do_lseek(handle, offset, SEEK_SET) == (off64_t)-1)
+	if (do_lseek(handle, offset, SEEK_SET) == (off_t)-1)
 		return -1;
 
 	endian8 = convert_endian_8(handle, size);
 	if (do_write_check(handle, &endian8, 8))
 		return -1;
-	if (do_lseek(handle, current, SEEK_SET) == (off64_t)-1)
+	if (do_lseek(handle, current, SEEK_SET) == (off_t)-1)
 		return -1;
 	return 0;
 }
@@ -587,7 +594,7 @@ static int save_string_section(struct tracecmd_output *handle, bool compress)
 	if (compress)
 		flags |= TRACECMD_SEC_FL_COMPRESS;
 	offset = out_write_section_header(handle, TRACECMD_OPTION_STRINGS, "strings", flags, false);
-	if (offset == (off64_t)-1)
+	if (offset == (off_t)-1)
 		return -1;
 
 	out_compression_start(handle, compress);
@@ -637,7 +644,7 @@ static int read_header_files(struct tracecmd_output *handle, bool compress)
 		flags |= TRACECMD_SEC_FL_COMPRESS;
 	offset = out_write_section_header(handle, TRACECMD_OPTION_HEADER_INFO,
 					  "headers", flags, true);
-	if (offset == (off64_t)-1)
+	if (offset == (off_t)-1)
 		return -1;
 
 	out_compression_start(handle, compress);
@@ -965,7 +972,7 @@ static int read_ftrace_files(struct tracecmd_output *handle, bool compress)
 		flags |= TRACECMD_SEC_FL_COMPRESS;
 	offset = out_write_section_header(handle, TRACECMD_OPTION_FTRACE_EVENTS,
 					  "ftrace events", flags, true);
-	if (offset == (off64_t)-1)
+	if (offset == (off_t)-1)
 		return -1;
 
 	create_event_list_item(handle, &systems, &list);
@@ -1024,7 +1031,7 @@ static int read_event_files(struct tracecmd_output *handle,
 		flags |= TRACECMD_SEC_FL_COMPRESS;
 	offset = out_write_section_header(handle, TRACECMD_OPTION_EVENT_FORMATS,
 					  "events format", flags, true);
-	if (offset == (off64_t)-1)
+	if (offset == (off_t)-1)
 		return -1;
 	/*
 	 * If any of the list is the special keyword "all" then
@@ -1138,7 +1145,7 @@ static int read_proc_kallsyms(struct tracecmd_output *handle, bool compress)
 		flags |= TRACECMD_SEC_FL_COMPRESS;
 	offset = out_write_section_header(handle, TRACECMD_OPTION_KALLSYMS,
 					  "kallsyms", flags, true);
-	if (offset == (off64_t)-1)
+	if (offset == (off_t)-1)
 		return -1;
 
 	out_compression_start(handle, compress);
@@ -1202,7 +1209,7 @@ static int read_ftrace_printk(struct tracecmd_output *handle, bool compress)
 	if (compress)
 		flags |= TRACECMD_SEC_FL_COMPRESS;
 	offset = out_write_section_header(handle, TRACECMD_OPTION_PRINTK, "printk", flags, true);
-	if (offset == (off64_t)-1)
+	if (offset == (off_t)-1)
 		return -1;
 
 	out_compression_start(handle, compress);
@@ -1247,8 +1254,8 @@ static int save_tracing_file_data(struct tracecmd_output *handle,
 	unsigned long long endian8;
 	char *file = NULL;
 	struct stat st;
-	off64_t check_size;
-	off64_t size;
+	off_t check_size;
+	off_t size;
 	int ret = -1;
 
 	file = get_tracing_file(handle, filename);
@@ -1842,9 +1849,9 @@ static int write_options_v6(struct tracecmd_output *handle)
 	return 0;
 }
 
-static int update_options_start(struct tracecmd_output *handle, off64_t offset)
+static int update_options_start(struct tracecmd_output *handle, off_t offset)
 {
-	if (do_lseek(handle, handle->options_start, SEEK_SET) == (off64_t)-1)
+	if (do_lseek(handle, handle->options_start, SEEK_SET) == (off_t)-1)
 		return -1;
 	offset = convert_endian_8(handle, offset);
 	if (do_write_check(handle, &offset, 8))
@@ -1867,7 +1874,7 @@ static int update_options_start(struct tracecmd_output *handle, off64_t offset)
  *
  * Returns zero on success and -1 on error.
  */
-int tracecmd_prepare_options(struct tracecmd_output *handle, off64_t offset, int whence)
+int tracecmd_prepare_options(struct tracecmd_output *handle, off_t offset, int whence)
 {
 	tsize_t curr;
 	int ret;
@@ -1887,7 +1894,7 @@ int tracecmd_prepare_options(struct tracecmd_output *handle, off64_t offset, int
 		break;
 	case SEEK_END:
 		offset = do_lseek(handle, offset, SEEK_END);
-		if (offset == (off64_t)-1)
+		if (offset == (off_t)-1)
 			return -1;
 		break;
 	}
@@ -2059,7 +2066,7 @@ __hidden void *trace_get_options(struct tracecmd_output *handle, size_t *len)
 	if (!buf)
 		goto out;
 
-	if (do_lseek(&out_handle, 0, SEEK_SET) == (off64_t)-1)
+	if (do_lseek(&out_handle, 0, SEEK_SET) == (off_t)-1)
 		goto out;
 	*len = read(msg_handle.cfd, buf, offset);
 	if (*len != offset) {
@@ -2270,7 +2277,7 @@ int tracecmd_write_cmdlines(struct tracecmd_output *handle)
 		flags |= TRACECMD_SEC_FL_COMPRESS;
 	offset = out_write_section_header(handle, TRACECMD_OPTION_CMDLINES,
 					  "command lines", flags, true);
-	if (offset == (off64_t)-1)
+	if (offset == (off_t)-1)
 		return -1;
 
 	out_compression_start(handle, compress);
@@ -2519,7 +2526,7 @@ static int update_buffer_cpu_offset_v6(struct tracecmd_output *handle,
 	current = do_lseek(handle, 0, SEEK_CUR);
 
 	/* Go to the option data, where will write the offest */
-	if (do_lseek(handle, b_offset, SEEK_SET) == (off64_t)-1) {
+	if (do_lseek(handle, b_offset, SEEK_SET) == (off_t)-1) {
 		tracecmd_warning("could not seek to %lld", b_offset);
 		return -1;
 	}
@@ -2528,7 +2535,7 @@ static int update_buffer_cpu_offset_v6(struct tracecmd_output *handle,
 		return -1;
 
 	/* Go back to end of file */
-	if (do_lseek(handle, current, SEEK_SET) == (off64_t)-1) {
+	if (do_lseek(handle, current, SEEK_SET) == (off_t)-1) {
 		tracecmd_warning("could not seek to %lld", offset);
 		return -1;
 	}
@@ -2652,7 +2659,7 @@ __hidden int out_write_cpu_data(struct tracecmd_output *handle,
 		data_files[i].data_offset &= ~(page_size - 1);
 
 		ret = do_lseek(handle, data_files[i].data_offset, SEEK_SET);
-		if (ret == (off64_t)-1)
+		if (ret == (off_t)-1)
 			goto out_free;
 
 		if (!tracecmd_get_quiet(handle))
@@ -2660,7 +2667,7 @@ __hidden int out_write_cpu_data(struct tracecmd_output *handle,
 				i, (unsigned long long)data_files[i].data_offset);
 
 		if (data[i].size) {
-			if (lseek64(data[i].fd, data[i].offset, SEEK_SET) == (off64_t)-1)
+			if (lseek(data[i].fd, data[i].offset, SEEK_SET) == (off_t)-1)
 				goto out_free;
 			read_size = out_copy_fd_compress(handle, data[i].fd,
 							 data[i].size, &data_files[i].write_size,
@@ -2678,19 +2685,19 @@ __hidden int out_write_cpu_data(struct tracecmd_output *handle,
 
 		if (!HAS_SECTIONS(handle)) {
 			/* Write the real CPU data offset in the file */
-			if (do_lseek(handle, data_files[i].file_data_offset, SEEK_SET) == (off64_t)-1)
+			if (do_lseek(handle, data_files[i].file_data_offset, SEEK_SET) == (off_t)-1)
 				goto out_free;
 			endian8 = convert_endian_8(handle, data_files[i].data_offset);
 			if (do_write_check(handle, &endian8, 8))
 				goto out_free;
 			/* Write the real CPU data size in the file */
-			if (do_lseek(handle, data_files[i].file_write_size, SEEK_SET) == (off64_t)-1)
+			if (do_lseek(handle, data_files[i].file_write_size, SEEK_SET) == (off_t)-1)
 				goto out_free;
 			endian8 = convert_endian_8(handle, data_files[i].write_size);
 			if (do_write_check(handle, &endian8, 8))
 				goto out_free;
 			offset = data_files[i].data_offset + data_files[i].write_size;
-			if (do_lseek(handle, offset, SEEK_SET) == (off64_t)-1)
+			if (do_lseek(handle, offset, SEEK_SET) == (off_t)-1)
 				goto out_free;
 		}
 		if (!tracecmd_get_quiet(handle)) {
@@ -2709,7 +2716,7 @@ __hidden int out_write_cpu_data(struct tracecmd_output *handle,
 		goto out_free;
 
 	free(data_files);
-	if (do_lseek(handle, 0, SEEK_END) == (off64_t)-1)
+	if (do_lseek(handle, 0, SEEK_END) == (off_t)-1)
 		return -1;
 
 	if (out_update_section_header(handle, offset))
@@ -2978,7 +2985,7 @@ __hidden int out_save_options_offset(struct tracecmd_output *handle, unsigned lo
 			return -1;
 
 		new = do_lseek(handle, 0, SEEK_CUR);
-		if (do_lseek(handle, handle->options_start, SEEK_SET) == (off64_t)-1)
+		if (do_lseek(handle, handle->options_start, SEEK_SET) == (off_t)-1)
 			return -1;
 
 		en8 = convert_endian_8(handle, start);
@@ -2986,7 +2993,7 @@ __hidden int out_save_options_offset(struct tracecmd_output *handle, unsigned lo
 			return -1;
 
 		handle->options_start = new;
-		if (do_lseek(handle, new, SEEK_SET) == (off64_t)-1)
+		if (do_lseek(handle, new, SEEK_SET) == (off_t)-1)
 			return -1;
 	} else {
 		handle->options_start = start;

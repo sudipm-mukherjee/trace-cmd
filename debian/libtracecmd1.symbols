@@ -72,6 +72,7 @@ libtracecmd.so.1 libtracecmd1 #MINVER#
  tracecmd_filter_ids@Base 3.0.3
  tracecmd_flush_recording@Base 3.0.3
  tracecmd_follow_event@Base 3.1.4
+ tracecmd_follow_missed_events@Base 3.1.6
  tracecmd_free_hooks@Base 3.0.3
  tracecmd_free_record@Base 3.0.3
  tracecmd_free_recorder@Base 3.0.3
@@ -158,6 +159,7 @@ libtracecmd.so.1 libtracecmd1 #MINVER#
  tracecmd_output_close@Base 3.0.3
  tracecmd_output_create@Base 3.0.3
  tracecmd_output_create_fd@Base 3.0.3
+ tracecmd_output_flush@Base 3.1.6
  tracecmd_output_free@Base 3.0.3
  tracecmd_output_set_compression@Base 3.0.3
  tracecmd_output_set_from_input@Base 3.0.3

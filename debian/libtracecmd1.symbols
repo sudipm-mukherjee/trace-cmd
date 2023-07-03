@@ -103,6 +103,7 @@ libtracecmd.so.1 libtracecmd1 #MINVER#
  tracecmd_get_tep@Base 3.0.3
  tracecmd_get_trace_clock@Base 3.0.3
  tracecmd_get_traceid@Base 3.0.3
+ tracecmd_get_tsc2nsec@Base 3.2
  tracecmd_get_uname@Base 3.0.3
  tracecmd_get_use_trace_clock@Base 3.0.3
  tracecmd_get_version@Base 3.0.3

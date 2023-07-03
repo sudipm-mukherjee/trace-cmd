@@ -2818,8 +2818,13 @@ int tracecmd_iterate_events(struct tracecmd_input *handle,
 		}
 	} while (next_cpu >= 0 && ret >= 0);
 
-	for (cpu = 0; cpu < handle->max_cpu; cpu++)
-		tracecmd_free_record(records[cpu]);
+	/* Need to unlock and free the records */
+	for (cpu = 0; cpu < handle->max_cpu; cpu++) {
+		if (!records[cpu])
+			continue;
+		record = tracecmd_read_data(handle, cpu);
+		tracecmd_free_record(record);
+	}
 
 	free(records);
 
@@ -2908,6 +2913,19 @@ int tracecmd_iterate_events_multi(struct tracecmd_input **handles,
 		}
 
 	} while (next_cpu >= 0 && ret >= 0);
+
+	/* Unlock and free the records */
+	for (cpu = 0; cpu < all_cpus; cpu++) {
+		int local_cpu;
+
+		if (!records[cpu].record)
+			continue;
+
+		handle = records[cpu].handle;
+		local_cpu = cpu - handle->start_cpu;
+		record = tracecmd_read_data(handle, local_cpu);
+		tracecmd_free_record(record);
+	}
 
 	/*
 	 * The records array contains only records that were taken via
@@ -4924,6 +4942,8 @@ void tracecmd_close(struct tracecmd_input *handle)
 	free(handle->trace_clock);
 	free(handle->strings);
 	free(handle->version);
+	free(handle->followers);
+	free(handle->missed_followers);
 	trace_guest_map_free(handle->map);
 	close(handle->fd);
 	free(handle->latz.chunks);
@@ -6115,6 +6135,33 @@ size_t tracecmd_get_options_offset(struct tracecmd_input *handle)
 const char *tracecmd_get_trace_clock(struct tracecmd_input *handle)
 {
 	return handle->trace_clock;
+}
+
+/**
+ * tracecmd_get_tsc2nsec - get the calculation numbers to convert to nsecs
+ * @mult: If not NULL, points to where to save the multiplier
+ * @shift: If not NULL, points to where to save the shift.
+ * @offset: If not NULL, points to where to save the offset.
+ *
+ * This only returns a value if the clock is of a raw type.
+ * (currently just x86-tsc is supported).
+ *
+ * Returns 0 on success, or -1 on not supported clock (but may still fill
+ * in the values).
+ */
+int tracecmd_get_tsc2nsec(struct tracecmd_input *handle,
+			  int *mult, int *shift, unsigned long long *offset)
+{
+	if (mult)
+		*mult = handle->tsc_calc.mult;
+	if (shift)
+		*shift = handle->tsc_calc.shift;
+	if (offset)
+		*offset = handle->tsc_calc.offset;
+
+	return handle->top_buffer.clock &&
+		(strcmp(handle->top_buffer.clock, "x86-tsc") == 0 ||
+		 strcmp(handle->top_buffer.clock, "tsc2nsec") == 0) ? 0 : -1;
 }
 
 /**

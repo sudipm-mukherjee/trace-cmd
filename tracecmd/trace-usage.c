@@ -334,7 +334,7 @@ static struct usage_help usage_help[] = {
 	{
 		"agent",
 		"listen on a vsocket for trace clients",
-		" %s agent -p port[-D][-N][-P cid]\n"
+		" %s agent -p port[-D][-N IP][-P cid]\n"
 		"          Creates a vsocket to listen for clients.\n"
 		"          -N Connect to IP via TCP instead of vsockets\n"
 		"             *** Insecure setting, only use on a trusted network ***\n"
@@ -428,6 +428,15 @@ static struct usage_help usage_help[] = {
 		"          --clock trace clock, saved in the file\n"
 		"          -h, --help show usage information\n"
 		"          --verbose 'level' Set the desired log level\n"
+	},
+	{
+		"attach",
+		"Attach a host and guest trace.dat file",
+		" %s attach [options] host_file guest_file vcpu_pid,...\n"
+		"          -s  offset,scale,fraction[,timestamp] conversion to sync guest timestamp\n"
+		"          host_file The trace.dat file from the host\n"
+		"          guest_file The trace.dat file from the guest\n"
+		"          vcpu_pid list of process ids from the host that represent the vCPUs of the guest\n"
 	},
 	{
 		"convert",

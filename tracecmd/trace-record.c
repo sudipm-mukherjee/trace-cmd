@@ -382,11 +382,9 @@ struct buffer_instance *allocate_instance(const char *name)
 	return instance;
 
 error:
-	if (instance) {
-		free(instance->name);
-		tracefs_instance_free(instance->tracefs);
-		free(instance);
-	}
+	free(instance->name);
+	tracefs_instance_free(instance->tracefs);
+	free(instance);
 	return NULL;
 }
 
@@ -1683,6 +1681,46 @@ static int change_user(const char *user)
 	return 0;
 }
 
+static void execute_program(int argc, char **argv)
+{
+	char buf[PATH_MAX + NAME_MAX + 1];
+	char *path;
+	char *entry;
+	char *saveptr;
+
+	/*
+	 * if command specified by user is neither absolute nor
+	 * relative than we search for it in $PATH.
+	 */
+	if (!strchr(argv[0], '/')) {
+		path = getenv("PATH");
+
+		if (!path)
+			die("can't search for '%s' if $PATH is NULL", argv[0]);
+
+		for (entry = strtok_r(path, ":", &saveptr);
+		     entry; entry = strtok_r(NULL, ":", &saveptr)) {
+
+			snprintf(buf, sizeof(buf), "%s/%s", entry, argv[0]);
+
+			/* does it exist and can we execute it? */
+			if (access(buf, X_OK) == 0)
+				break;
+
+		}
+	} else {
+		strncpy(buf, argv[0], sizeof(buf));
+	}
+
+	tracecmd_enable_tracing();
+	if (execve(buf, argv, environ)) {
+		fprintf(stderr, "\n********************\n");
+		fprintf(stderr, " Unable to exec %s\n", argv[0]);
+		fprintf(stderr, "********************\n");
+		die("Failed to exec %s", argv[0]);
+	}
+}
+
 static void run_cmd(enum trace_type type, const char *user, int argc, char **argv)
 {
 	int status;
@@ -1693,7 +1731,6 @@ static void run_cmd(enum trace_type type, const char *user, int argc, char **arg
 	if (!pid) {
 		/* child */
 		update_task_filter();
-		tracecmd_enable_tracing();
 		if (!fork_process)
 			enable_ptrace();
 		/*
@@ -1709,12 +1746,7 @@ static void run_cmd(enum trace_type type, const char *user, int argc, char **arg
 		if (change_user(user) < 0)
 			die("Failed to change user to %s", user);
 
-		if (execvp(argv[0], argv)) {
-			fprintf(stderr, "\n********************\n");
-			fprintf(stderr, " Unable to exec %s\n", argv[0]);
-			fprintf(stderr, "********************\n");
-			die("Failed to exec %s", argv[0]);
-		}
+		execute_program(argc, argv);
 	}
 	if (fork_process)
 		exit(0);
@@ -5261,7 +5293,8 @@ void tracecmd_remove_instances(void)
 			close(instance->tracing_on_fd);
 			instance->tracing_on_fd = 0;
 		}
-		tracefs_instance_destroy(instance->tracefs);
+		if (tracefs_instance_is_new(instance->tracefs))
+			tracefs_instance_destroy(instance->tracefs);
 	}
 }
 
@@ -6021,7 +6054,8 @@ static inline void remove_instances(struct buffer_instance *instances)
 		del = instances;
 		instances = instances->next;
 		free(del->name);
-		tracefs_instance_destroy(del->tracefs);
+		if (tracefs_instance_is_new(del->tracefs))
+			tracefs_instance_destroy(del->tracefs);
 		tracefs_instance_free(del->tracefs);
 		free(del);
 	}
@@ -7107,7 +7141,7 @@ void trace_extract(int argc, char **argv)
 
 	type = get_trace_cmd_type(ctx.curr_cmd);
 
-	update_first_instance(ctx.instance, 1);
+	update_first_instance(ctx.instance, ctx.topt);
 	check_function_plugin();
 
 	if (!ctx.output)

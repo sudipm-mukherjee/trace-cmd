@@ -1,8 +1,8 @@
 # SPDX-License-Identifier: GPL-2.0
 # trace-cmd version
 TC_VERSION = 3
-TC_PATCHLEVEL = 1
-TC_EXTRAVERSION = 6
+TC_PATCHLEVEL = 2
+TC_EXTRAVERSION = 0
 TRACECMD_VERSION = $(TC_VERSION).$(TC_PATCHLEVEL).$(TC_EXTRAVERSION)
 
 export TC_VERSION
@@ -11,8 +11,8 @@ export TC_EXTRAVERSION
 export TRACECMD_VERSION
 
 LIBTC_VERSION = 1
-LIBTC_PATCHLEVEL = 3
-LIBTC_EXTRAVERSION = 1
+LIBTC_PATCHLEVEL = 4
+LIBTC_EXTRAVERSION = 0
 LIBTRACECMD_VERSION = $(LIBTC_VERSION).$(LIBTC_PATCHLEVEL).$(LIBTC_EXTRAVERSION)
 
 export LIBTC_VERSION
@@ -454,6 +454,9 @@ test: force trace-cmd
 ifneq ($(CUNIT_INSTALLED),1)
 	$(error CUnit framework not installed, cannot build unit tests))
 endif
+	$(Q)$(MAKE) -C $(src)/utest $@
+
+test_mem: force test
 	$(Q)$(MAKE) -C $(src)/utest $@
 
 plugins_tracecmd: force $(obj)/lib/trace-cmd/plugins/tracecmd_plugin_dir
